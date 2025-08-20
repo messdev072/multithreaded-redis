@@ -78,6 +78,14 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleDel(c, v)
 			case "TTL":
 				s.handleTTL(c, v)
+			case "SADD":
+				s.handleSAdd(c, v)
+			case "SREM":
+				s.handleSRem(c, v)
+			case "SMEMBERS":
+				s.handleSMembers(c, v)
+			case "SCARD":
+				s.handleSCard(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
@@ -166,4 +174,61 @@ func (s *Server) handleTTL(c net.Conn, args protocol.Array) {
 	ttl := s.store.TTL(string(key))
 
 	c.Write([]byte(protocol.Encode(protocol.Integer(ttl))))
+}
+
+func (s *Server) handleSAdd(c net.Conn, args protocol.Array) {
+	if len(args) < 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SADD' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+
+	members := []string{}
+	for i := 2; i < len(args); i++ {
+		members = append(members, string(args[i].(protocol.BulkString)))
+	}
+
+	added := s.store.SAdd(key, members...)
+	c.Write([]byte(protocol.Encode(protocol.Integer(added))))
+}
+
+func (s *Server) handleSRem(c net.Conn, args protocol.Array) {
+	if len(args) < 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SREM' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+
+	members := []string{}
+	for i := 2; i < len(args); i++ {
+		members = append(members, string(args[i].(protocol.BulkString)))
+	}
+
+	removed := s.store.SRem(key, members...)
+	c.Write([]byte(protocol.Encode(protocol.Integer(removed))))
+}
+
+func (s *Server) handleSMembers(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SMEMBERS' command"))))
+	}
+	key := string(args[1].(protocol.BulkString))
+
+	members := s.store.SMembers(key)
+	arr := []protocol.RESPType{}
+	for _, m := range members {
+		arr = append(arr, protocol.BulkString(m))
+	}
+
+	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+}
+
+func (s *Server) handleSCard(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SCARD' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+	card := s.store.SCard(key)
+	c.Write([]byte(protocol.Encode(protocol.Integer(card))))
 }

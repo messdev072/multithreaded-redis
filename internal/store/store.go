@@ -1,18 +1,44 @@
 package store
 
 import (
+	"math/rand"
 	"sync"
 	"time"
 )
 
+type ValueType int
+
+const (
+	StringType ValueType = iota
+	SetType
+)
+
 type Value struct {
-	Data []byte
+	Type ValueType
+	Data []byte              // for strings
+	Set  map[string]struct{} // for sets
 }
 
 type Store struct {
-	mu   sync.RWMutex
-	data map[string]Value
-	ttl  map[string]time.Time
+	mu      sync.RWMutex
+	data    map[string]Value
+	ttl     map[string]time.Time
+	ttlKeys []string // for random sampling
+}
+
+func (s *Store) expired(key string) bool {
+	exp, ok := s.ttl[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		s.mu.Lock()
+		delete(s.data, key)
+		delete(s.ttl, key)
+		s.mu.Unlock()
+		return true
+	}
+	return false
 }
 
 func NewStore() *Store {
@@ -26,8 +52,13 @@ func (s *Store) Set(key string, val []byte, expire time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.expired(key)
+
 	s.data[key] = Value{Data: val}
 	if expire > 0 {
+		if _, exists := s.ttl[key]; !exists {
+			s.ttlKeys = append(s.ttlKeys, key) //track new TTL key
+		}
 		s.ttl[key] = time.Now().Add(expire)
 	} else {
 		delete(s.ttl, key)
@@ -36,15 +67,9 @@ func (s *Store) Set(key string, val []byte, expire time.Duration) {
 
 func (s *Store) Get(key string) ([]byte, bool) {
 	s.mu.RLock()
-	exp, hasTTL := s.ttl[key]
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
 
-	if hasTTL && time.Now().After(exp) {
-		// expired, remove lazily
-		s.mu.Lock()
-		delete(s.data, key)
-		delete(s.ttl, key)
-		s.mu.Unlock()
+	if s.expired(key) {
 		return nil, false
 	}
 
@@ -84,10 +109,29 @@ func (s *Store) TTL(key string) int64 {
 	}
 
 	ttl := time.Until(exp)
-	if ttl < 0 {
+	if ttl <= 0 {
 		return -2
 	}
 	return int64(ttl.Seconds())
+}
+
+func (s *Store) PTTL(key string) int64 {
+	s.mu.Lock()
+	defer s.mu.RUnlock()
+
+	exp, ok := s.ttl[key]
+	if !ok {
+		if _, exists := s.data[key]; exists {
+			return -1
+		}
+		return -2
+	}
+
+	ttl := time.Until(exp)
+	if ttl <= 0 {
+		return -2
+	}
+	return ttl.Microseconds()
 }
 
 func (s *Store) StartCleaner(sampleSize int, interval time.Duration) {
@@ -96,14 +140,129 @@ func (s *Store) StartCleaner(sampleSize int, interval time.Duration) {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			s.mu.Lock()
-			for k, exp := range s.ttl {
-				if time.Now().After(exp) {
-					delete(s.data, k)
-					delete(s.ttl, k)
+			for {
+				expired := s.expireCycle(sampleSize)
+				if expired < sampleSize/4 { // if less than 25% expired, break to avoid busy loop
+					break
 				}
 			}
-			s.mu.Unlock()
 		}
 	}()
+}
+
+func (s *Store) expireCycle(sampleSize int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.ttlKeys) == 0 {
+		return 0
+	}
+
+	expiredCount := 0
+	now := time.Now()
+
+	for i := 0; i < sampleSize; i++ {
+		// pick random key
+		idx := rand.Intn(len(s.ttlKeys))
+		k := s.ttlKeys[idx]
+
+		exp, ok := s.ttl[k]
+		if !ok {
+			continue
+		}
+		if now.After(exp) {
+			delete(s.data, k)
+			delete(s.ttl, k)
+			expiredCount++
+		}
+	}
+	return expiredCount
+}
+
+func (s *Store) SAdd(key string, members ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		// expired key is like it never existed
+	}
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: SetType, Set: make(map[string]struct{})}
+		s.data[key] = val
+	}
+
+	if val.Type != SetType {
+		return 0 // in Redis, this would be a WRONGTYPE error (we’ll handle in dispatcher)
+	}
+
+	added := 0
+	for _, m := range members {
+		if _, exists := val.Set[m]; !exists {
+			val.Set[m] = struct{}{}
+			added++
+		}
+	}
+	s.data[key] = val
+	return added
+}
+
+func (s *Store) SRem(key string, members ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		return 0
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return 0
+	}
+
+	removed := 0
+	for _, m := range members {
+		if _, exists := val.Set[m]; exists {
+			delete(val.Set, m)
+			removed++
+		}
+	}
+	return removed
+}
+
+func (s *Store) SMembers(key string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		return nil
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return nil
+	}
+
+	out := make([]string, 0, len(val.Set))
+	for m := range val.Set {
+		out = append(out, m)
+	}
+	return out
+}
+
+func (s *Store) SCard(key string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		return 0
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return 0
+	}
+
+	return len(val.Set)
 }
