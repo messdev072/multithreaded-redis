@@ -231,6 +231,7 @@ func (s *Store) SRem(key string, members ...string) int {
 	return removed
 }
 
+// Return all members.
 func (s *Store) SMembers(key string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -251,6 +252,7 @@ func (s *Store) SMembers(key string) []string {
 	return out
 }
 
+// Cardinality (count of set members)
 func (s *Store) SCard(key string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -265,4 +267,227 @@ func (s *Store) SCard(key string) int {
 	}
 
 	return len(val.Set)
+}
+
+func (s *Store) SIsMember(key, member string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		return false
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return false
+	}
+
+	_, exists := val.Set[member]
+	return exists
+}
+
+// SUnion returns the union of multiple sets
+func (s *Store) SUnion(keys ...string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make(map[string]struct{})
+	for _, k := range keys {
+		if s.expired(k) {
+			continue
+		}
+		val, ok := s.data[k]
+		if !ok || val.Type != SetType {
+			continue
+		}
+		for m := range val.Set {
+			result[m] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(result))
+	for m := range result {
+		out = append(out, m)
+	}
+	return out
+}
+
+// SInter returns the intersection of multiple sets
+func (s *Store) SInter(keys ...string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	//Start with 1st set
+	firstKey := keys[0]
+	if s.expired(firstKey) {
+		return nil
+	}
+	val, ok := s.data[firstKey]
+	if !ok || val.Type != SetType {
+		return nil
+	}
+
+	result := make(map[string]struct{})
+	for m := range val.Set {
+		result[m] = struct{}{}
+	}
+
+	//Intersert with remaining sets
+	for _, k := range keys[1:] {
+		if s.expired(k) {
+			return nil
+		}
+		val, ok := s.data[k]
+		if !ok || val.Type != SetType {
+			return nil
+		}
+		for m := range result {
+			if _, exists := val.Set[m]; !exists {
+				delete(result, m)
+			}
+		}
+	}
+
+	out := make([]string, 0, len(result))
+	for m := range result {
+		out = append(out, m)
+	}
+	return out
+}
+
+// Difference (elements in first set but not in others).
+func (s *Store) SDiff(keys ...string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	firstKey := keys[0]
+	if s.expired(firstKey) {
+		return nil
+	}
+	val, ok := s.data[firstKey]
+	if !ok || val.Type != SetType {
+		return nil
+	}
+
+	result := make(map[string]struct{})
+	for m := range val.Set {
+		result[m] = struct{}{}
+	}
+
+	for _, k := range keys[1:] {
+		if s.expired(k) {
+			continue
+		}
+		val, ok := s.data[k]
+		if !ok || val.Type != SetType {
+			continue
+		}
+		for m := range val.Set {
+			delete(result, m)
+		}
+	}
+
+	out := make([]string, 0, len(result))
+	for m := range result {
+		out = append(out, m)
+	}
+	return out
+}
+
+// Return one or more random ellements
+func (s *Store) SRandMember(key string, count int) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		return nil
+	}
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return nil
+	}
+
+	n := len(val.Set)
+	if n == 0 {
+		return nil
+	}
+
+	//Flatten to slice
+	all := make([]string, 0, n)
+	for m := range val.Set {
+		all = append(all, m)
+	}
+
+	if count <= 0 {
+		// return single random
+		return []string{all[rand.Intn(n)]}
+	}
+
+	//Cap count
+	if count > n {
+		count = n
+	}
+
+	//Sample without replacement
+	rand.Shuffle(n, func(i, j int) {
+		all[i], all[j] = all[j], all[i]
+	})
+	return all[:count]
+}
+
+// Removes the chosen elements
+func (s *Store) SPop(key string, count int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		return nil
+	}
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return nil
+	}
+
+	n := len(val.Set)
+	if n == 0 {
+		return nil
+	}
+
+	//Flatten to slice
+	all := make([]string, 0, n)
+	for m := range val.Set {
+		all = append(all, m)
+	}
+
+	if count <= 0 {
+		// default: one element
+		count = 1
+	}
+	if count > n {
+		count = n
+	}
+
+	// Shuffle and pick
+	rand.Shuffle(n, func(i, j int) { all[i], all[j] = all[j], all[i] })
+	selected := all[:count]
+
+	// Remove from set
+	for _, m := range selected {
+		delete(val.Set, m)
+	}
+
+	// If empty after removal, delete key entirely
+	if len(val.Set) == 0 {
+		delete(s.data, key)
+	}
+
+	return selected
 }

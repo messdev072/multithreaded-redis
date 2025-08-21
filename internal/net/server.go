@@ -18,10 +18,14 @@ type Server struct {
 }
 
 func NewServer(addr string) *Server {
-	return &Server{
+	s := &Server{
 		addr:  addr,
 		store: store.NewStore(),
 	}
+
+	// Kick of active expiration
+	s.store.StartCleaner(20, 100000*time.Millisecond)
+	return s
 }
 
 func (s *Server) Start() error {
@@ -86,6 +90,18 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleSMembers(c, v)
 			case "SCARD":
 				s.handleSCard(c, v)
+			case "SPOP":
+				s.handleSPop(c, v)
+			case "SUNION":
+				s.handleSUnion(c, v)
+			case "SINTER":
+				s.handleSInter(c, v)
+			case "SDIFF":
+				s.handleSDiff(c, v)
+			case "SISMEMBER":
+				s.handleSIsMember(c, v)
+			case "SRANDMEMBER":
+				s.handleSRandMember(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
@@ -231,4 +247,145 @@ func (s *Server) handleSCard(c net.Conn, args protocol.Array) {
 	key := string(args[1].(protocol.BulkString))
 	card := s.store.SCard(key)
 	c.Write([]byte(protocol.Encode(protocol.Integer(card))))
+}
+
+func (s *Server) handleSIsMember(c net.Conn, args protocol.Array) {
+	if len(args) != 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of argumments for 'SIMEMBER' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+	member := string(args[2].(protocol.BulkString))
+
+	ok := s.store.SIsMember(key, member)
+	if ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+	}
+}
+
+func (s *Server) handleSUnion(c net.Conn, args protocol.Array) {
+	if len(args) < 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SUNION' command"))))
+		return
+	}
+	keys := make([]string, 0, len(args)-1)
+	for _, a := range args[1:] {
+		keys = append(keys, string(a.(protocol.BulkString)))
+	}
+
+	result := s.store.SUnion(keys...)
+	arr := make([]protocol.RESPType, 0, len(result))
+	for _, v := range result {
+		arr = append(arr, protocol.BulkString(v))
+	}
+	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+}
+
+func (s *Server) handleSInter(c net.Conn, args protocol.Array) {
+	if len(args) < 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SINTER' command"))))
+		return
+	}
+
+	keys := make([]string, 0, len(args)-1)
+	for _, a := range args[1:] {
+		keys = append(keys, string(a.(protocol.BulkString)))
+	}
+
+	result := s.store.SInter(keys...)
+	arr := make([]protocol.RESPType, 0, len(result))
+	for _, v := range result {
+		arr = append(arr, protocol.BulkString(v))
+	}
+	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+}
+
+func (s *Server) handleSDiff(c net.Conn, args protocol.Array) {
+	if len(args) < 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SDIFF' command"))))
+		return
+	}
+
+	keys := make([]string, 0, len(args)-1)
+	for _, a := range args[1:] {
+		keys = append(keys, string(a.(protocol.BulkString)))
+	}
+
+	result := s.store.SDiff(keys...)
+	arr := make([]protocol.RESPType, 0, len(result))
+	for _, v := range result {
+		arr = append(arr, protocol.BulkString(v))
+	}
+	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+}
+
+func (s *Server) handleSPop(c net.Conn, args protocol.Array) {
+	if len(args) < 2 || len(args) > 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SPOP' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+
+	count := 1
+	if len(args) == 3 {
+		n, err := strconv.Atoi(string(args[2].(protocol.BulkString)))
+		if err != nil || n < 0 {
+			c.Write([]byte(protocol.Encode(protocol.Error("ERR value is not an integer or out of range"))))
+			return
+		}
+		count = n
+	}
+
+	result := s.store.SPop(key, count)
+	if result == nil {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR null"))))
+		return
+	}
+
+	if count == 1 {
+		c.Write([]byte(protocol.Encode(protocol.BulkString(result[0]))))
+	} else {
+		arr := make([]protocol.RESPType, len(result))
+		for i, v := range result {
+			arr[i] = protocol.BulkString(v)
+		}
+		c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+	}
+}
+
+func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
+	if len(args) < 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SRANDMEMBER' command"))))
+	}
+	key := string(args[1].(protocol.BulkString))
+	count := 0
+
+	if len(args) > 2 {
+		n, err := strconv.Atoi(string(args[2].(protocol.BulkString)))
+		if err != nil {
+			c.Write([]byte(protocol.Encode(protocol.Error("ERR value is not an integer or out of range"))))
+			return
+		}
+		count = n
+	}
+
+	result := s.store.SRandMember(key, count)
+	if result == nil {
+		c.Write([]byte(protocol.Encode(protocol.Array(nil))))
+	}
+
+	if count == 0 {
+		//single value
+		c.Write([]byte(protocol.Encode(protocol.BulkString(result[0]))))
+		return
+	}
+
+	// array response
+	arr := make(protocol.Array, 0, len(result))
+	for _, v := range result {
+		arr = append(arr, protocol.BulkString(v))
+	}
+	c.Write([]byte(protocol.Encode(arr)))
 }
