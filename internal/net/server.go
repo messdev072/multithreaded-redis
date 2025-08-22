@@ -102,6 +102,14 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleSIsMember(c, v)
 			case "SRANDMEMBER":
 				s.handleSRandMember(c, v)
+			case "HSET":
+				s.handleHSet(c, v)
+			case "HGET":
+				s.handleHGet(c, v)
+			case "HDEL":
+				s.handleHDel(c, v)
+			case "HGETALL":
+				s.handleHGetAll(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
@@ -387,5 +395,75 @@ func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
 	}
+	c.Write([]byte(protocol.Encode(arr)))
+}
+
+func (s *Server) handleHSet(c net.Conn, args protocol.Array) {
+	if len(args) < 4 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HSET' command"))))
+		return
+	}
+
+	key := string(args[1].(protocol.BulkString))
+	field := string(args[2].(protocol.BulkString))
+	value := string(args[3].(protocol.BulkString))
+
+	res := s.store.HSet(key, field, value)
+	c.Write([]byte(protocol.Encode(protocol.Integer(res))))
+}
+
+func (s *Server) handleHGet(c net.Conn, args protocol.Array) {
+	if len(args) < 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HGET' command"))))
+		return
+	}
+
+	key := string(args[1].(protocol.BulkString))
+	field := string(args[2].(protocol.BulkString))
+
+	val, ok := s.store.HGet(key, field)
+	if !ok {
+		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		return
+	}
+	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
+}
+
+func (s *Server) handleHDel(c net.Conn, args protocol.Array) {
+	if len(args) < 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HDEL' command"))))
+		return
+	}
+
+	key := string(args[1].(protocol.BulkString))
+	fields := make([]string, 0, len(args)-2)
+	for _, a := range args[2:] {
+		fields = append(fields, string(a.(protocol.BulkString)))
+	}
+
+	deleted := s.store.HDel(key, fields...)
+	c.Write([]byte(protocol.Encode(protocol.Integer(deleted))))
+}
+
+func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HGETALL' command"))))
+		return
+	}
+
+	key := string(args[1].(protocol.BulkString))
+	result := s.store.HGetAll(key)
+
+	if result == nil {
+		// Redis returns empty array for non-existing or non-hash key
+		c.Write([]byte(protocol.Encode(protocol.Array{})))
+		return
+	}
+
+	arr := make(protocol.Array, 0, len(result)*2)
+	for field, val := range result {
+		arr = append(arr, protocol.BulkString(field), protocol.BulkString(val))
+	}
+
 	c.Write([]byte(protocol.Encode(arr)))
 }

@@ -11,12 +11,14 @@ type ValueType int
 const (
 	StringType ValueType = iota
 	SetType
+	HashType
 )
 
 type Value struct {
 	Type ValueType
 	Data []byte              // for strings
 	Set  map[string]struct{} // for sets
+	Hash map[string]string
 }
 
 type Store struct {
@@ -490,4 +492,99 @@ func (s *Store) SPop(key string, count int) []string {
 	}
 
 	return selected
+}
+
+// HSET key field value
+func (s *Store) HSet(key, field, value string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+	}
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: HashType, Hash: make(map[string]string)}
+		s.data[key] = val
+	}
+	if val.Type != HashType {
+		return 0
+	}
+
+	_, exists := val.Hash[field]
+	val.Hash[field] = value
+	if exists {
+		return 0
+	}
+	return 1
+}
+
+// HGET key field
+func (s *Store) HGet(key, field string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return "", false
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != HashType {
+		return "", false
+	}
+	value, ok := val.Hash[field]
+	return value, ok
+}
+
+// HDEL key field [field...]
+func (s *Store) HDel(key string, fields ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return 0
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != HashType {
+		return 0
+	}
+
+	deleted := 0
+	for _, f := range fields {
+		if _, exists := val.Hash[f]; exists {
+			delete(val.Hash, f)
+			deleted++
+		}
+	}
+
+	if len(val.Hash) == 0 {
+		delete(s.data, key)
+	}
+	return deleted
+}
+
+// HGETALL key
+func (s *Store) HGetAll(key string) map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return nil
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != HashType {
+		return nil
+	}
+
+	result := make(map[string]string, len(val.Hash))
+	for k, val := range val.Hash {
+		result[k] = val
+	}
+	return result
 }
