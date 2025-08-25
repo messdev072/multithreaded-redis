@@ -126,6 +126,16 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleLLen(c, v)
 			case "LRANGE":
 				s.handleLRange(c, v)
+			case "ZADD":
+				s.handleZAdd(c, v)
+			case "ZSCORE":
+				s.handleZScore(c, v)
+			case "ZCARD":
+				s.handleZCard(c, v)
+			case "ZRANK":
+				s.handleZRank(c, v)
+			case "ZRANGE":
+				s.handleZRange(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
@@ -398,6 +408,7 @@ func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 	result := s.store.SRandMember(key, count)
 	if result == nil {
 		c.Write([]byte(protocol.Encode(protocol.Array(nil))))
+		return
 	}
 
 	if count == 0 {
@@ -619,5 +630,97 @@ func (s *Server) handleLRange(c net.Conn, args protocol.Array) {
 		arr = append(arr, protocol.BulkString(v))
 	}
 
+	c.Write([]byte(protocol.Encode(arr)))
+}
+
+// ZADD key score member [score member ...]
+func (s *Server) handleZAdd(c net.Conn, args protocol.Array) {
+	if len(args) < 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZADD' command"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	members := make(map[string]float64)
+	for i := 2; i+1 < len(args); i += 2 {
+		scoreStr, _ := args[i].(protocol.BulkString)
+		member, _ := args[i+1].(protocol.BulkString)
+		score, err := strconv.ParseFloat(string(scoreStr), 64)
+		if err != nil {
+			c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid score for 'ZADD'"))))
+			return
+		}
+		members[string(member)] = score
+	}
+	added := s.store.ZAdd(string(key), members)
+	c.Write([]byte(protocol.Encode(protocol.Integer(added))))
+}
+
+func (s *Server) handleZScore(c net.Conn, args protocol.Array) {
+	if len(args) != 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZSCORE' command"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	member, _ := args[2].(protocol.BulkString)
+	score, ok := s.store.ZScore(string(key), string(member))
+	if !ok {
+		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		return
+	}
+	c.Write([]byte(protocol.Encode(protocol.BulkString(fmt.Sprintf("%f", score)))))
+}
+
+func (s *Server) handleZCard(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZCARD' command"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	count := s.store.ZCard(string(key))
+	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+}
+
+func (s *Server) handleZRank(c net.Conn, args protocol.Array) {
+	if len(args) != 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZRANK' command"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	member, _ := args[2].(protocol.BulkString)
+	rank, ok := s.store.ZRank(string(key), string(member))
+	if !ok {
+		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		return
+	}
+	c.Write([]byte(protocol.Encode(protocol.Integer(rank))))
+}
+
+func (s *Server) handleZRange(c net.Conn, args protocol.Array) {
+	if len(args) < 4 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZRANGE' command"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	start, err1 := strconv.Atoi(string(args[2].(protocol.BulkString)))
+	stop, err2 := strconv.Atoi(string(args[3].(protocol.BulkString)))
+	withScores := false
+	if len(args) > 4 && len(args) == 5 {
+		if bs, ok := args[4].(protocol.BulkString); ok && (string(bs) == "WITHSCORES" || string(bs) == "withscores") {
+			withScores = true
+		}
+	}
+	if err1 != nil || err2 != nil {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid start/stop for 'ZRANGE'"))))
+		return
+	}
+	result := s.store.ZRange(string(key), start, stop, withScores)
+	if result == nil {
+		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		return
+	}
+	arr := make(protocol.Array, len(result))
+	for i, v := range result {
+		arr[i] = protocol.BulkString(v)
+	}
 	c.Write([]byte(protocol.Encode(arr)))
 }

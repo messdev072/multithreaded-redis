@@ -1,7 +1,9 @@
 package store
 
 import (
+	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 )
@@ -14,6 +16,7 @@ const (
 	HashType
 	CMSType
 	ListType
+	ZSetType
 )
 
 type CountMinSketch struct {
@@ -30,6 +33,7 @@ type Value struct {
 	Hash map[string]string
 	CMS  *CountMinSketch // for Count-Min Sketch
 	List []string
+	ZSet map[string]float64
 }
 
 type Store struct {
@@ -780,4 +784,172 @@ func (s *Store) LRange(key string, start, stop int) []string {
 	}
 
 	return val.List[start : stop+1]
+}
+
+// ZADD
+func (s *Store) ZAdd(key string, members map[string]float64) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: ZSetType, ZSet: make(map[string]float64)}
+		s.data[key] = val
+	}
+	if val.Type != ZSetType {
+		return -1
+	}
+
+	added := 0
+	for member, score := range members {
+		if _, exists := val.ZSet[member]; !exists {
+			added++
+		}
+		val.ZSet[member] = score
+	}
+	s.data[key] = val
+	return added
+}
+
+// ZSCORE
+func (s *Store) ZScore(key, member string) (float64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return 0, false
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ZSetType {
+		return 0, false
+	}
+
+	score, exists := val.ZSet[member]
+	return score, exists
+}
+
+// ZCARD
+func (s *Store) ZCard(key string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return 0
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ZSetType {
+		return 0
+	}
+
+	return len(val.ZSet)
+}
+
+// ZRANK
+func (s *Store) ZRank(key, member string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return 0, false
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ZSetType {
+		return 0, false
+	}
+
+	// sort menbers by score
+	type pair struct {
+		member string
+		score  float64
+	}
+	pairs := make([]pair, 0, len(val.ZSet))
+	for m, score := range val.ZSet {
+		pairs = append(pairs, pair{m, score})
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].score == pairs[j].score {
+			return pairs[i].member < pairs[j].member // tie-breaker: lex order
+		}
+		return pairs[i].score < pairs[j].score
+	})
+	// find rank
+	for rank, p := range pairs {
+		if p.member == member {
+			return rank, true
+		}
+	}
+	return 0, false
+}
+
+// ZRANGE
+func (s *Store) ZRange(key string, start, stop int, withScores bool) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return nil
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ZSetType {
+		return nil
+	}
+
+	// sort menbers by score
+	type pair struct {
+		member string
+		score  float64
+	}
+	pairs := make([]pair, 0, len(val.ZSet))
+	for m, score := range val.ZSet {
+		pairs = append(pairs, pair{m, score})
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].score == pairs[j].score {
+			return pairs[i].member < pairs[j].member // tie-breaker: lex order
+		}
+		return pairs[i].score < pairs[j].score
+	})
+
+	n := len(pairs)
+	if n == 0 {
+		return nil
+	}
+
+	// Handle negative indices
+	if start < 0 {
+		start = n + start
+	}
+	if stop < 0 {
+		stop = n + stop
+	}
+
+	// Clamp to bounds
+	if start < 0 {
+		start = 0
+	}
+	if stop >= n {
+		stop = n - 1
+	}
+	if start > stop || start >= n {
+		return nil
+	}
+
+	result := make([]string, 0, stop-start+1)
+	for _, p := range pairs[start : stop+1] {
+		result = append(result, p.member)
+		if withScores {
+			result = append(result, fmt.Sprintf("%f", p.score))
+		}
+	}
+	return result
 }
