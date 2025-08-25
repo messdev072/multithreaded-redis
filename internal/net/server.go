@@ -110,6 +110,10 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleHDel(c, v)
 			case "HGETALL":
 				s.handleHGetAll(c, v)
+			case "CMS.INCR":
+				s.handleCMSIncr(c, v)
+			case "CMS.QUERY":
+				s.handleCMSQuery(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
@@ -466,4 +470,38 @@ func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 	}
 
 	c.Write([]byte(protocol.Encode(arr)))
+}
+
+// CMS.INCR key item count
+func (s *Server) handleCMSIncr(c net.Conn, args protocol.Array) {
+	if len(args) != 4 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMS.INCR'"))))
+		return
+	}
+
+	key := string(args[1].(protocol.BulkString))
+	item := string(args[2].(protocol.BulkString))
+	countStr := string(args[3].(protocol.BulkString))
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid count"))))
+		return
+	}
+
+	s.store.CMSIncr(key, item, uint32(count))
+	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+}
+
+// CMS.QUERY key item
+func (s *Server) handleCMSQuery(c net.Conn, args protocol.Array) {
+	if len(args) != 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMS.QUERY'"))))
+		return
+	}
+
+	key := string(args[1].(protocol.BulkString))
+	item := string(args[2].(protocol.BulkString))
+
+	count := s.store.CMSQuery(key, item)
+	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
 }

@@ -12,13 +12,22 @@ const (
 	StringType ValueType = iota
 	SetType
 	HashType
+	CMSType
 )
+
+type CountMinSketch struct {
+	depth     int
+	width     int
+	table     [][]uint32
+	hashFuncs []func(string) uint32
+}
 
 type Value struct {
 	Type ValueType
 	Data []byte              // for strings
 	Set  map[string]struct{} // for sets
 	Hash map[string]string
+	CMS  *CountMinSketch // for Count-Min Sketch
 }
 
 type Store struct {
@@ -587,4 +596,41 @@ func (s *Store) HGetAll(key string) map[string]string {
 		result[k] = val
 	}
 	return result
+}
+
+func (s *Store) CMSIncr(key, item string, count uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+	}
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: CMSType, CMS: NewCountMinSketch(4, 1000)}
+	}
+	if val.Type != CMSType {
+		return // in Redis, this would be a WRONGTYPE error (we’ll handle in dispatcher)
+	}
+
+	val.CMS.Incr(item, count)
+	s.data[key] = val
+}
+
+func (s *Store) CMSQuery(key, item string) uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return 0
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != CMSType {
+		return 0
+	}
+
+	return val.CMS.Query(item)
 }
