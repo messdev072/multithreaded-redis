@@ -13,6 +13,7 @@ const (
 	SetType
 	HashType
 	CMSType
+	ListType
 )
 
 type CountMinSketch struct {
@@ -28,6 +29,7 @@ type Value struct {
 	Set  map[string]struct{} // for sets
 	Hash map[string]string
 	CMS  *CountMinSketch // for Count-Min Sketch
+	List []string
 }
 
 type Store struct {
@@ -598,6 +600,7 @@ func (s *Store) HGetAll(key string) map[string]string {
 	return result
 }
 
+// CMS.INCR key item count
 func (s *Store) CMSIncr(key, item string, count uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -618,6 +621,7 @@ func (s *Store) CMSIncr(key, item string, count uint32) {
 	s.data[key] = val
 }
 
+// CMS.QUERY key item
 func (s *Store) CMSQuery(key, item string) uint32 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -633,4 +637,147 @@ func (s *Store) CMSQuery(key, item string) uint32 {
 	}
 
 	return val.CMS.Query(item)
+}
+
+// LPUSH
+func (s *Store) LPush(key string, values ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: ListType, List: []string{}}
+		s.data[key] = val
+	}
+	if val.Type != ListType {
+		return -1
+	}
+
+	// Prepend (reverse order for multiple push)
+	for i := len(values) - 1; i >= 0; i-- {
+		val.List = append([]string{values[i]}, val.List...)
+	}
+	s.data[key] = val
+	return len(val.List)
+}
+
+// RPUSH
+func (s *Store) RPush(key string, values ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: ListType, List: []string{}}
+		s.data[key] = val
+	}
+	if val.Type != ListType {
+		return -1
+	}
+
+	val.List = append(val.List, values...)
+	s.data[key] = val
+	return len(val.List)
+}
+
+// LPOP
+func (s *Store) LPop(key string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return "", false
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ListType || len(val.List) == 0 {
+		return "", false
+	}
+
+	item := val.List[0]
+	val.List = val.List[1:]
+	s.data[key] = val
+	return item, true
+}
+
+// RPOP
+func (s *Store) RPop(key string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return "", false
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ListType || len(val.List) == 0 {
+		return "", false
+	}
+
+	idx := len(val.List) - 1
+	item := val.List[idx]
+	val.List = val.List[:idx]
+	s.data[key] = val
+	return item, true
+}
+
+// LLEN
+func (s *Store) LLen(key string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return 0
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ListType {
+		return 0
+	}
+	return len(val.List)
+}
+
+// LRANGE
+func (s *Store) LRange(key string, start, stop int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return nil
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ListType {
+		return nil
+	}
+
+	n := len(val.List)
+	if n == 0 {
+		return nil
+	}
+
+	// Handle negative indices
+	if start < 0 {
+		start = n + start
+	}
+	if stop < 0 {
+		stop = n + stop
+	}
+
+	// Clamp to bounds
+	if start < 0 {
+		start = 0
+	}
+	if stop >= n {
+		stop = n - 1
+	}
+	if start > stop || start >= n {
+		return nil
+	}
+
+	return val.List[start : stop+1]
 }

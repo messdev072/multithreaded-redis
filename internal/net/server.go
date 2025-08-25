@@ -114,6 +114,18 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleCMSIncr(c, v)
 			case "CMS.QUERY":
 				s.handleCMSQuery(c, v)
+			case "LPUSH":
+				s.handleLPush(c, v)
+			case "RPUSH":
+				s.handleRPush(c, v)
+			case "LPOP":
+				s.handleLPop(c, v)
+			case "RPOP":
+				s.handleRPop(c, v)
+			case "LLEN":
+				s.handleLLen(c, v)
+			case "LRANGE":
+				s.handleLRange(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
@@ -504,4 +516,108 @@ func (s *Server) handleCMSQuery(c net.Conn, args protocol.Array) {
 
 	count := s.store.CMSQuery(key, item)
 	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+}
+
+// LPUSH key value [value ...]
+func (s *Server) handleLPush(c net.Conn, args protocol.Array) {
+	if len(args) < 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LPUSH' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+
+	values := []string{}
+	for i := 2; i < len(args); i++ {
+		values = append(values, string(args[i].(protocol.BulkString)))
+	}
+
+	newLen := s.store.LPush(key, values...)
+	c.Write([]byte(protocol.Encode(protocol.Integer(newLen))))
+}
+
+// RPUSH key value [value ...]
+func (s *Server) handleRPush(c net.Conn, args protocol.Array) {
+	if len(args) < 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'RPUSH' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+
+	values := []string{}
+	for i := 2; i < len(args); i++ {
+		values = append(values, string(args[i].(protocol.BulkString)))
+	}
+
+	newLen := s.store.RPush(key, values...)
+	c.Write([]byte(protocol.Encode(protocol.Integer(newLen))))
+}
+
+// LPOP key
+func (s *Server) handleLPop(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LPOP' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+
+	val, ok := s.store.LPop(key)
+	if !ok {
+		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		return
+	}
+
+	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
+}
+
+// RPOP key
+func (s *Server) handleRPop(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'RPOP' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+	val, ok := s.store.RPop(key)
+	if !ok {
+		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		return
+	}
+
+	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
+}
+
+// LLEN key
+func (s *Server) handleLLen(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LLEN' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+	length := s.store.LLen(key)
+	c.Write([]byte(protocol.Encode(protocol.Integer(length))))
+}
+
+// LRANGE key start stop
+func (s *Server) handleLRange(c net.Conn, args protocol.Array) {
+	if len(args) != 4 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LRANGE' command"))))
+		return
+	}
+	key := string(args[1].(protocol.BulkString))
+	startStr := string(args[2].(protocol.BulkString))
+	stopStr := string(args[3].(protocol.BulkString))
+
+	start, err1 := strconv.Atoi(startStr)
+	stop, err2 := strconv.Atoi(stopStr)
+	if err1 != nil || err2 != nil {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid start or stop index"))))
+		return
+	}
+
+	result := s.store.LRange(key, start, stop)
+	arr := make(protocol.Array, 0, len(result))
+	for _, v := range result {
+		arr = append(arr, protocol.BulkString(v))
+	}
+
+	c.Write([]byte(protocol.Encode(arr)))
 }
