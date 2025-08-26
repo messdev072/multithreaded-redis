@@ -136,6 +136,10 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleZRank(c, v)
 			case "ZRANGE":
 				s.handleZRange(c, v)
+			case "BFADD":
+				s.handleBFAdd(c, v)
+			case "BFEXISTS":
+				s.handleBFExists(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
@@ -655,6 +659,7 @@ func (s *Server) handleZAdd(c net.Conn, args protocol.Array) {
 	c.Write([]byte(protocol.Encode(protocol.Integer(added))))
 }
 
+// ZSCORE key member
 func (s *Server) handleZScore(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZSCORE' command"))))
@@ -670,6 +675,7 @@ func (s *Server) handleZScore(c net.Conn, args protocol.Array) {
 	c.Write([]byte(protocol.Encode(protocol.BulkString(fmt.Sprintf("%f", score)))))
 }
 
+// ZSCORE key member
 func (s *Server) handleZCard(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZCARD' command"))))
@@ -680,6 +686,7 @@ func (s *Server) handleZCard(c net.Conn, args protocol.Array) {
 	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
 }
 
+// ZRANK key member
 func (s *Server) handleZRank(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZRANK' command"))))
@@ -695,6 +702,7 @@ func (s *Server) handleZRank(c net.Conn, args protocol.Array) {
 	c.Write([]byte(protocol.Encode(protocol.Integer(rank))))
 }
 
+// ZRANGE key start stop [WITHSCORES]
 func (s *Server) handleZRange(c net.Conn, args protocol.Array) {
 	if len(args) < 4 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZRANGE' command"))))
@@ -723,4 +731,36 @@ func (s *Server) handleZRange(c net.Conn, args protocol.Array) {
 		arr[i] = protocol.BulkString(v)
 	}
 	c.Write([]byte(protocol.Encode(arr)))
+}
+
+// BF.ADD key item
+func (s *Server) handleBFAdd(c net.Conn, args protocol.Array) {
+	if len(args) != 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'BFADD' command (expected key m k item)"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	item, _ := args[2].(protocol.BulkString)
+	ok := s.store.BFAdd(string(key), string(item))
+	if ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+	}
+}
+
+// Handler for BFEXISTS: BFEXISTS key item
+func (s *Server) handleBFExists(c net.Conn, args protocol.Array) {
+	if len(args) != 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'BFEXISTS' command (expected key item)"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	item, _ := args[2].(protocol.BulkString)
+	ok := s.store.BFExists(string(key), string(item))
+	if ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+	}
 }

@@ -1,8 +1,15 @@
-package store
+package datastuctures
 
 import (
 	"hash/fnv"
 )
+
+type CountMinSketch struct {
+	depth     int
+	width     int
+	table     [][]uint32
+	hashFuncs []func(string) uint32
+}
 
 func NewCountMinSketch(depth, width int) *CountMinSketch {
 	cms := &CountMinSketch{

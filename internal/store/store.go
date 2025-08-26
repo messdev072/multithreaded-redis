@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"multithreaded-redis/internal/datastuctures"
 )
 
 type ValueType int
@@ -17,23 +19,18 @@ const (
 	CMSType
 	ListType
 	ZSetType
+	BFType
 )
-
-type CountMinSketch struct {
-	depth     int
-	width     int
-	table     [][]uint32
-	hashFuncs []func(string) uint32
-}
 
 type Value struct {
 	Type ValueType
 	Data []byte              // for strings
 	Set  map[string]struct{} // for sets
 	Hash map[string]string
-	CMS  *CountMinSketch // for Count-Min Sketch
+	CMS  *datastuctures.CountMinSketch // for Count-Min Sketch
 	List []string
 	ZSet map[string]float64
+	BF   *datastuctures.BloomFilter // for Bloom Filter
 }
 
 type Store struct {
@@ -615,7 +612,7 @@ func (s *Store) CMSIncr(key, item string, count uint32) {
 
 	val, ok := s.data[key]
 	if !ok {
-		val = Value{Type: CMSType, CMS: NewCountMinSketch(4, 1000)}
+		val = Value{Type: CMSType, CMS: datastuctures.NewCountMinSketch(4, 1000)}
 	}
 	if val.Type != CMSType {
 		return // in Redis, this would be a WRONGTYPE error (we’ll handle in dispatcher)
@@ -952,4 +949,49 @@ func (s *Store) ZRange(key string, start, stop int, withScores bool) []string {
 		}
 	}
 	return result
+}
+
+// BF.ADD
+func (s *Store) BFAdd(key, item string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+	}
+
+	// Get or create BloomFilter
+	val, ok := s.data[key]
+	if !ok || val.Type != BFType {
+		bf := datastuctures.NewBloomFilter(1_000_000, 7)
+		bf.Add(item)
+		s.data[key] = Value{Type: BFType, BF: bf}
+		return true
+	}
+
+	if val.Type != BFType {
+		return false // WRONGTYPE error in Redis (handled in dispatcher)
+	}
+
+	val.BF.Add(item)
+	s.data[key] = val
+	return true
+}
+
+// BF.EXISTS
+func (s *Store) BFExists(key, item string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return false
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != BFType {
+		return false
+	}
+
+	return val.BF.Exists(item)
 }
