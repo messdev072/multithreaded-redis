@@ -9,22 +9,27 @@ import (
 	"time"
 
 	"multithreaded-redis/internal/protocol"
-	"multithreaded-redis/internal/store"
+	"multithreaded-redis/internal/shard"
 )
 
 type Server struct {
-	addr  string
-	store *store.Store
+	addr   string
+	shards *shard.SharedStore
 }
 
 func NewServer(addr string) *Server {
 	s := &Server{
-		addr:  addr,
-		store: store.NewStore(),
+		addr:   addr,
+		shards: shard.NewSharedStore(8), // 8 shards, adjust as needed
 	}
 
-	// Kick of active expiration
-	s.store.StartCleaner(20, 100000*time.Millisecond)
+	// Kick off active expiration for each shard
+	for i := 0; i < s.shards.Count(); i++ {
+		shard := s.shards.Shards()[i]
+		if shard != nil {
+			shard.Store.StartCleaner(20, 100000*time.Millisecond)
+		}
+	}
 	return s
 }
 
@@ -174,7 +179,7 @@ func (s *Server) handleSET(c net.Conn, args protocol.Array) {
 		}
 	}
 
-	s.store.Set(string(key), []byte(val), expire)
+	s.shards.Set(string(key), []byte(val), expire)
 	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
 }
 
@@ -184,14 +189,12 @@ func (s *Server) handleGET(c net.Conn, args protocol.Array) {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'GET' command"))))
 		return
 	}
-
 	key, _ := args[1].(protocol.BulkString)
-	val, ok := s.store.Get(string(key))
+	val, ok := s.shards.Get(string(key))
 	if !ok {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
 		return
 	}
-
 	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
 }
 
@@ -201,19 +204,17 @@ func (s *Server) handleDel(c net.Conn, args protocol.Array) {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'DEL' command"))))
 		return
 	}
-
 	deleted := 0
-
 	for i := 1; i < len(args); i++ {
 		key, ok := args[i].(protocol.BulkString)
 		if !ok {
 			continue
 		}
-		if s.store.Delete(string(key)) {
+		res := s.shards.Execute("DEL", string(key))
+		if b, ok := res.(bool); ok && b {
 			deleted++
 		}
 	}
-
 	c.Write([]byte(protocol.Encode(protocol.Integer(deleted))))
 }
 
@@ -223,27 +224,30 @@ func (s *Server) handleTTL(c net.Conn, args protocol.Array) {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'TTL' command"))))
 		return
 	}
-
 	key, _ := args[1].(protocol.BulkString)
-	ttl := s.store.TTL(string(key))
-
-	c.Write([]byte(protocol.Encode(protocol.Integer(ttl))))
+	res := s.shards.Execute("TTL", string(key))
+	if ttl, ok := res.(int64); ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(ttl))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(-2))))
+	}
 }
-
 func (s *Server) handleSAdd(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SADD' command"))))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-
 	members := []string{}
 	for i := 2; i < len(args); i++ {
 		members = append(members, string(args[i].(protocol.BulkString)))
 	}
-
-	added := s.store.SAdd(key, members...)
-	c.Write([]byte(protocol.Encode(protocol.Integer(added))))
+	res := s.shards.Execute("SADD", key, members...)
+	if added, ok := res.(int); ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(added))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+	}
 }
 
 func (s *Server) handleSRem(c net.Conn, args protocol.Array) {
@@ -252,39 +256,45 @@ func (s *Server) handleSRem(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-
 	members := []string{}
 	for i := 2; i < len(args); i++ {
 		members = append(members, string(args[i].(protocol.BulkString)))
 	}
-
-	removed := s.store.SRem(key, members...)
-	c.Write([]byte(protocol.Encode(protocol.Integer(removed))))
+	res := s.shards.Execute("SREM", key, members...)
+	if removed, ok := res.(int); ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(removed))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+	}
 }
 
 func (s *Server) handleSMembers(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SMEMBERS' command"))))
+		return
 	}
 	key := string(args[1].(protocol.BulkString))
-
-	members := s.store.SMembers(key)
-	arr := []protocol.RESPType{}
+	res := s.shards.Execute("SMEMBERS", key)
+	members, _ := res.([]string)
+	arr := make([]protocol.RESPType, 0, len(members))
 	for _, m := range members {
 		arr = append(arr, protocol.BulkString(m))
 	}
-
 	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
 }
 
 func (s *Server) handleSCard(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SCARD' command"))))
-		return
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SCARD' command"))))
 	}
 	key := string(args[1].(protocol.BulkString))
-	card := s.store.SCard(key)
-	c.Write([]byte(protocol.Encode(protocol.Integer(card))))
+	res := s.shards.Execute("SCARD", key)
+	if card, ok := res.(int); ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(card))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+	}
 }
 
 func (s *Server) handleSIsMember(c net.Conn, args protocol.Array) {
@@ -295,8 +305,8 @@ func (s *Server) handleSIsMember(c net.Conn, args protocol.Array) {
 	key := string(args[1].(protocol.BulkString))
 	member := string(args[2].(protocol.BulkString))
 
-	ok := s.store.SIsMember(key, member)
-	if ok {
+	res := s.shards.Execute("SISMEMBER", key, member)
+	if ok, _ := res.(bool); ok {
 		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
 	} else {
 		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
@@ -313,7 +323,8 @@ func (s *Server) handleSUnion(c net.Conn, args protocol.Array) {
 		keys = append(keys, string(a.(protocol.BulkString)))
 	}
 
-	result := s.store.SUnion(keys...)
+	res := s.shards.Execute("SUNION", keys[0], keys...)
+	result, _ := res.([]string)
 	arr := make([]protocol.RESPType, 0, len(result))
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
@@ -332,7 +343,8 @@ func (s *Server) handleSInter(c net.Conn, args protocol.Array) {
 		keys = append(keys, string(a.(protocol.BulkString)))
 	}
 
-	result := s.store.SInter(keys...)
+	res := s.shards.Execute("SINTER", keys[0], keys...)
+	result, _ := res.([]string)
 	arr := make([]protocol.RESPType, 0, len(result))
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
@@ -351,7 +363,8 @@ func (s *Server) handleSDiff(c net.Conn, args protocol.Array) {
 		keys = append(keys, string(a.(protocol.BulkString)))
 	}
 
-	result := s.store.SDiff(keys...)
+	res := s.shards.Execute("SDIFF", keys[0], keys...)
+	result, _ := res.([]string)
 	arr := make([]protocol.RESPType, 0, len(result))
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
@@ -376,7 +389,8 @@ func (s *Server) handleSPop(c net.Conn, args protocol.Array) {
 		count = n
 	}
 
-	result := s.store.SPop(key, count)
+	res := s.shards.Execute("SPOP", key, fmt.Sprintf("%d", count))
+	result, _ := res.([]string)
 	if result == nil {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR null"))))
 		return
@@ -409,7 +423,8 @@ func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 		count = n
 	}
 
-	result := s.store.SRandMember(key, count)
+	res := s.shards.Execute("SRANDMEMBER", key, fmt.Sprintf("%d", count))
+	result, _ := res.([]string)
 	if result == nil {
 		c.Write([]byte(protocol.Encode(protocol.Array(nil))))
 		return
@@ -439,8 +454,12 @@ func (s *Server) handleHSet(c net.Conn, args protocol.Array) {
 	field := string(args[2].(protocol.BulkString))
 	value := string(args[3].(protocol.BulkString))
 
-	res := s.store.HSet(key, field, value)
-	c.Write([]byte(protocol.Encode(protocol.Integer(res))))
+	res := s.shards.Execute("HSET", key, field, value)
+	if n, ok := res.(int); ok {
+		c.Write([]byte(protocol.Encode(protocol.Integer(n))))
+	} else {
+		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+	}
 }
 
 func (s *Server) handleHGet(c net.Conn, args protocol.Array) {
@@ -452,7 +471,8 @@ func (s *Server) handleHGet(c net.Conn, args protocol.Array) {
 	key := string(args[1].(protocol.BulkString))
 	field := string(args[2].(protocol.BulkString))
 
-	val, ok := s.store.HGet(key, field)
+	res := s.shards.Execute("HGET", key, field)
+	val, ok := res.(string)
 	if !ok {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
 		return
@@ -472,7 +492,8 @@ func (s *Server) handleHDel(c net.Conn, args protocol.Array) {
 		fields = append(fields, string(a.(protocol.BulkString)))
 	}
 
-	deleted := s.store.HDel(key, fields...)
+	res := s.shards.Execute("HDEL", key, fields...)
+	deleted, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(deleted))))
 }
 
@@ -483,7 +504,8 @@ func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 	}
 
 	key := string(args[1].(protocol.BulkString))
-	result := s.store.HGetAll(key)
+	res := s.shards.Execute("HGETALL", key)
+	result, _ := res.(map[string]string)
 
 	if result == nil {
 		// Redis returns empty array for non-existing or non-hash key
@@ -515,7 +537,7 @@ func (s *Server) handleCMSIncr(c net.Conn, args protocol.Array) {
 		return
 	}
 
-	s.store.CMSIncr(key, item, uint32(count))
+	s.shards.Execute("CMSINCR", key, item, fmt.Sprintf("%d", count))
 	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
 }
 
@@ -529,7 +551,8 @@ func (s *Server) handleCMSQuery(c net.Conn, args protocol.Array) {
 	key := string(args[1].(protocol.BulkString))
 	item := string(args[2].(protocol.BulkString))
 
-	count := s.store.CMSQuery(key, item)
+	res := s.shards.Execute("CMSQUERY", key, item)
+	count, _ := res.(uint32)
 	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
 }
 
@@ -546,7 +569,8 @@ func (s *Server) handleLPush(c net.Conn, args protocol.Array) {
 		values = append(values, string(args[i].(protocol.BulkString)))
 	}
 
-	newLen := s.store.LPush(key, values...)
+	res := s.shards.Execute("LPUSH", key, values...)
+	newLen, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(newLen))))
 }
 
@@ -563,7 +587,8 @@ func (s *Server) handleRPush(c net.Conn, args protocol.Array) {
 		values = append(values, string(args[i].(protocol.BulkString)))
 	}
 
-	newLen := s.store.RPush(key, values...)
+	res := s.shards.Execute("RPUSH", key, values...)
+	newLen, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(newLen))))
 }
 
@@ -575,7 +600,8 @@ func (s *Server) handleLPop(c net.Conn, args protocol.Array) {
 	}
 	key := string(args[1].(protocol.BulkString))
 
-	val, ok := s.store.LPop(key)
+	res := s.shards.Execute("LPOP", key)
+	val, ok := res.(string)
 	if !ok {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
 		return
@@ -591,7 +617,8 @@ func (s *Server) handleRPop(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	val, ok := s.store.RPop(key)
+	res := s.shards.Execute("RPOP", key)
+	val, ok := res.(string)
 	if !ok {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
 		return
@@ -607,7 +634,8 @@ func (s *Server) handleLLen(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	length := s.store.LLen(key)
+	res := s.shards.Execute("LLEN", key)
+	length, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(length))))
 }
 
@@ -628,7 +656,8 @@ func (s *Server) handleLRange(c net.Conn, args protocol.Array) {
 		return
 	}
 
-	result := s.store.LRange(key, start, stop)
+	res := s.shards.Execute("LRANGE", key, fmt.Sprintf("%d", start), fmt.Sprintf("%d", stop))
+	result, _ := res.([]string)
 	arr := make(protocol.Array, 0, len(result))
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
@@ -655,7 +684,13 @@ func (s *Server) handleZAdd(c net.Conn, args protocol.Array) {
 		}
 		members[string(member)] = score
 	}
-	added := s.store.ZAdd(string(key), members)
+	// Convert protocol.Array to []string for members
+	memberArgs := []string{}
+	for i := 2; i < len(args); i++ {
+		memberArgs = append(memberArgs, string(args[i].(protocol.BulkString)))
+	}
+	res := s.shards.Execute("ZADD", string(key), memberArgs...)
+	added, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(added))))
 }
 
@@ -667,7 +702,8 @@ func (s *Server) handleZScore(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	member, _ := args[2].(protocol.BulkString)
-	score, ok := s.store.ZScore(string(key), string(member))
+	res := s.shards.Execute("ZSCORE", string(key), string(member))
+	score, ok := res.(float64)
 	if !ok {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
 		return
@@ -682,7 +718,8 @@ func (s *Server) handleZCard(c net.Conn, args protocol.Array) {
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
-	count := s.store.ZCard(string(key))
+	res := s.shards.Execute("ZCARD", string(key))
+	count, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
 }
 
@@ -694,7 +731,8 @@ func (s *Server) handleZRank(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	member, _ := args[2].(protocol.BulkString)
-	rank, ok := s.store.ZRank(string(key), string(member))
+	res := s.shards.Execute("ZRANK", string(key), string(member))
+	rank, ok := res.(int)
 	if !ok {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
 		return
@@ -721,7 +759,8 @@ func (s *Server) handleZRange(c net.Conn, args protocol.Array) {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid start/stop for 'ZRANGE'"))))
 		return
 	}
-	result := s.store.ZRange(string(key), start, stop, withScores)
+	res := s.shards.Execute("ZRANGE", string(key), fmt.Sprintf("%d", start), fmt.Sprintf("%d", stop), fmt.Sprintf("%t", withScores))
+	result, _ := res.([]string)
 	if result == nil {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
 		return
@@ -741,7 +780,8 @@ func (s *Server) handleBFAdd(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	item, _ := args[2].(protocol.BulkString)
-	ok := s.store.BFAdd(string(key), string(item))
+	res := s.shards.Execute("BFADD", string(key), string(item))
+	ok, _ := res.(bool)
 	if ok {
 		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
 	} else {
@@ -757,7 +797,8 @@ func (s *Server) handleBFExists(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	item, _ := args[2].(protocol.BulkString)
-	ok := s.store.BFExists(string(key), string(item))
+	res := s.shards.Execute("BFEXISTS", string(key), string(item))
+	ok, _ := res.(bool)
 	if ok {
 		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
 	} else {
