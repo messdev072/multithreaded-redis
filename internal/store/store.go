@@ -23,14 +23,16 @@ const (
 )
 
 type Value struct {
-	Type ValueType
-	Data []byte              // for strings
-	Set  map[string]struct{} // for sets
-	Hash map[string]string
-	CMS  *datastuctures.CountMinSketch // for Count-Min Sketch
-	List []string
-	ZSet map[string]float64
-	BF   *datastuctures.BloomFilter // for Bloom Filter
+	Type       ValueType
+	Data       []byte              // for strings
+	Set        map[string]struct{} // for sets
+	Hash       map[string]string
+	CMS        *datastuctures.CountMinSketch // for Count-Min Sketch
+	List       []string
+	ZSet       map[string]float64
+	BF         *datastuctures.BloomFilter // for Bloom Filter
+	Expiration int64                      // Unix timestamp in seconds; 0 means no expiration
+	LastAccess int64                      // Unix timestamp in seconds
 }
 
 type Store struct {
@@ -67,8 +69,13 @@ func (s *Store) Set(key string, val []byte, expire time.Duration) {
 	defer s.mu.Unlock()
 
 	s.expired(key)
+	expiration := int64(0)
 
-	s.data[key] = Value{Data: val}
+	s.data[key] = Value{
+		Data:       val,
+		Expiration: expiration,
+		LastAccess: time.Now().UnixNano(),
+	}
 	if expire > 0 {
 		if _, exists := s.ttl[key]; !exists {
 			s.ttlKeys = append(s.ttlKeys, key) //track new TTL key
@@ -80,16 +87,17 @@ func (s *Store) Set(key string, val []byte, expire time.Duration) {
 }
 
 func (s *Store) Get(key string) ([]byte, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.expired(key) {
 		return nil, false
 	}
 
-	s.mu.RLock()
 	val, ok := s.data[key]
-	s.mu.RUnlock()
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+
 	if !ok {
 		return nil, false
 	}
@@ -210,6 +218,7 @@ func (s *Store) SAdd(key string, members ...string) int {
 	if val.Type != SetType {
 		return 0 // in Redis, this would be a WRONGTYPE error (we’ll handle in dispatcher)
 	}
+	val.LastAccess = time.Now().UnixNano()
 
 	added := 0
 	for _, m := range members {
@@ -234,6 +243,8 @@ func (s *Store) SRem(key string, members ...string) int {
 	if !ok || val.Type != SetType {
 		return 0
 	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
 
 	removed := 0
 	for _, m := range members {
@@ -258,6 +269,8 @@ func (s *Store) SMembers(key string) []string {
 	if !ok || val.Type != SetType {
 		return nil
 	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
 
 	out := make([]string, 0, len(val.Set))
 	for m := range val.Set {
@@ -279,6 +292,8 @@ func (s *Store) SCard(key string) int {
 	if !ok || val.Type != SetType {
 		return 0
 	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
 
 	return len(val.Set)
 }
@@ -295,6 +310,8 @@ func (s *Store) SIsMember(key, member string) bool {
 	if !ok || val.Type != SetType {
 		return false
 	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
 
 	_, exists := val.Set[member]
 	return exists
@@ -314,6 +331,8 @@ func (s *Store) SUnion(keys ...string) []string {
 		if !ok || val.Type != SetType {
 			continue
 		}
+		val.LastAccess = time.Now().UnixNano()
+		s.data[k] = val
 		for m := range val.Set {
 			result[m] = struct{}{}
 		}
@@ -345,6 +364,9 @@ func (s *Store) SInter(keys ...string) []string {
 		return nil
 	}
 
+	val.LastAccess = time.Now().UnixNano()
+	s.data[firstKey] = val
+
 	result := make(map[string]struct{})
 	for m := range val.Set {
 		result[m] = struct{}{}
@@ -355,10 +377,12 @@ func (s *Store) SInter(keys ...string) []string {
 		if s.expired(k) {
 			return nil
 		}
-		val, ok := s.data[k]
-		if !ok || val.Type != SetType {
+		v, ok := s.data[k]
+		if !ok || v.Type != SetType {
 			return nil
 		}
+		v.LastAccess = time.Now().UnixNano()
+		s.data[k] = v
 		for m := range result {
 			if _, exists := val.Set[m]; !exists {
 				delete(result, m)
@@ -391,6 +415,10 @@ func (s *Store) SDiff(keys ...string) []string {
 		return nil
 	}
 
+	// LRU: update LastAccess for firstKey
+	val.LastAccess = time.Now().UnixNano()
+	s.data[firstKey] = val
+
 	result := make(map[string]struct{})
 	for m := range val.Set {
 		result[m] = struct{}{}
@@ -400,11 +428,14 @@ func (s *Store) SDiff(keys ...string) []string {
 		if s.expired(k) {
 			continue
 		}
-		val, ok := s.data[k]
-		if !ok || val.Type != SetType {
+		v, ok := s.data[k]
+		if !ok || v.Type != SetType {
 			continue
 		}
-		for m := range val.Set {
+		// LRU: update LastAccess for k
+		v.LastAccess = time.Now().UnixNano()
+		s.data[k] = v
+		for m := range v.Set {
 			delete(result, m)
 		}
 	}
@@ -454,6 +485,8 @@ func (s *Store) SRandMember(key string, count int) []string {
 	rand.Shuffle(n, func(i, j int) {
 		all[i], all[j] = all[j], all[i]
 	})
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
 	return all[:count]
 }
 
@@ -501,6 +534,9 @@ func (s *Store) SPop(key string, count int) []string {
 	// If empty after removal, delete key entirely
 	if len(val.Set) == 0 {
 		delete(s.data, key)
+	} else {
+		val.LastAccess = time.Now().UnixNano()
+		s.data[key] = val
 	}
 
 	return selected
@@ -526,9 +562,11 @@ func (s *Store) HSet(key, field, value string) int {
 
 	_, exists := val.Hash[field]
 	val.Hash[field] = value
-	if exists {
+	if !exists {
 		return 0
 	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
 	return 1
 }
 
@@ -547,6 +585,8 @@ func (s *Store) HGet(key, field string) (string, bool) {
 		return "", false
 	}
 	value, ok := val.Hash[field]
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
 	return value, ok
 }
 
@@ -575,7 +615,11 @@ func (s *Store) HDel(key string, fields ...string) int {
 
 	if len(val.Hash) == 0 {
 		delete(s.data, key)
+	} else {
+		val.LastAccess = time.Now().UnixNano()
+		s.data[key] = val
 	}
+
 	return deleted
 }
 
@@ -590,6 +634,7 @@ func (s *Store) HGetAll(key string) map[string]string {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
 	if !ok || val.Type != HashType {
 		return nil
 	}
@@ -598,6 +643,7 @@ func (s *Store) HGetAll(key string) map[string]string {
 	for k, val := range val.Hash {
 		result[k] = val
 	}
+	s.data[key] = val
 	return result
 }
 
@@ -612,13 +658,17 @@ func (s *Store) CMSIncr(key, item string, count uint32) {
 
 	val, ok := s.data[key]
 	if !ok {
-		val = Value{Type: CMSType, CMS: datastuctures.NewCountMinSketch(4, 1000)}
+		val = Value{
+			Type: CMSType,
+			CMS:  datastuctures.NewCountMinSketch(4, 1000),
+		}
 	}
 	if val.Type != CMSType {
 		return // in Redis, this would be a WRONGTYPE error (we’ll handle in dispatcher)
 	}
 
 	val.CMS.Incr(item, count)
+	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
 }
 
@@ -633,10 +683,12 @@ func (s *Store) CMSQuery(key, item string) uint32 {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
 	if !ok || val.Type != CMSType {
 		return 0
 	}
 
+	s.data[key] = val
 	return val.CMS.Query(item)
 }
 
@@ -647,7 +699,10 @@ func (s *Store) LPush(key string, values ...string) int {
 
 	val, ok := s.data[key]
 	if !ok {
-		val = Value{Type: ListType, List: []string{}}
+		val = Value{
+			Type: ListType,
+			List: []string{},
+		}
 		s.data[key] = val
 	}
 	if val.Type != ListType {
@@ -658,6 +713,7 @@ func (s *Store) LPush(key string, values ...string) int {
 	for i := len(values) - 1; i >= 0; i-- {
 		val.List = append([]string{values[i]}, val.List...)
 	}
+	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
 	return len(val.List)
 }
@@ -669,14 +725,17 @@ func (s *Store) RPush(key string, values ...string) int {
 
 	val, ok := s.data[key]
 	if !ok {
-		val = Value{Type: ListType, List: []string{}}
+		val = Value{
+			Type: ListType,
+			List: []string{},
+		}
 		s.data[key] = val
 	}
 	if val.Type != ListType {
 		return -1
 	}
-
 	val.List = append(val.List, values...)
+	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
 	return len(val.List)
 }
@@ -692,6 +751,7 @@ func (s *Store) LPop(key string) (string, bool) {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
 	if !ok || val.Type != ListType || len(val.List) == 0 {
 		return "", false
 	}
@@ -713,6 +773,7 @@ func (s *Store) RPop(key string) (string, bool) {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
 	if !ok || val.Type != ListType || len(val.List) == 0 {
 		return "", false
 	}
@@ -735,9 +796,11 @@ func (s *Store) LLen(key string) int {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
 	if !ok || val.Type != ListType {
 		return 0
 	}
+	s.data[key] = val
 	return len(val.List)
 }
 
@@ -752,6 +815,7 @@ func (s *Store) LRange(key string, start, stop int) []string {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
 	if !ok || val.Type != ListType {
 		return nil
 	}
@@ -780,6 +844,7 @@ func (s *Store) LRange(key string, start, stop int) []string {
 		return nil
 	}
 
+	s.data[key] = val
 	return val.List[start : stop+1]
 }
 
@@ -790,7 +855,10 @@ func (s *Store) ZAdd(key string, members map[string]float64) int {
 
 	val, ok := s.data[key]
 	if !ok {
-		val = Value{Type: ZSetType, ZSet: make(map[string]float64)}
+		val = Value{
+			Type: ZSetType,
+			ZSet: make(map[string]float64),
+		}
 		s.data[key] = val
 	}
 	if val.Type != ZSetType {
@@ -804,6 +872,7 @@ func (s *Store) ZAdd(key string, members map[string]float64) int {
 		}
 		val.ZSet[member] = score
 	}
+	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
 	return added
 }
@@ -824,6 +893,7 @@ func (s *Store) ZScore(key, member string) (float64, bool) {
 	}
 
 	score, exists := val.ZSet[member]
+	s.data[key] = val
 	return score, exists
 }
 
@@ -841,7 +911,7 @@ func (s *Store) ZCard(key string) int {
 	if !ok || val.Type != ZSetType {
 		return 0
 	}
-
+	s.data[key] = val
 	return len(val.ZSet)
 }
 
@@ -856,6 +926,7 @@ func (s *Store) ZRank(key, member string) (int, bool) {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
 	if !ok || val.Type != ZSetType {
 		return 0, false
 	}
@@ -882,6 +953,7 @@ func (s *Store) ZRank(key, member string) (int, bool) {
 			return rank, true
 		}
 	}
+	s.data[key] = val
 	return 0, false
 }
 
@@ -896,6 +968,8 @@ func (s *Store) ZRange(key string, start, stop int, withScores bool) []string {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
+
 	if !ok || val.Type != ZSetType {
 		return nil
 	}
@@ -948,6 +1022,7 @@ func (s *Store) ZRange(key string, start, stop int, withScores bool) []string {
 			result = append(result, fmt.Sprintf("%f", p.score))
 		}
 	}
+	s.data[key] = val
 	return result
 }
 
@@ -965,7 +1040,10 @@ func (s *Store) BFAdd(key, item string) bool {
 	if !ok || val.Type != BFType {
 		bf := datastuctures.NewBloomFilter(1_000_000, 7)
 		bf.Add(item)
-		s.data[key] = Value{Type: BFType, BF: bf}
+		s.data[key] = Value{
+			Type: BFType,
+			BF:   bf,
+		}
 		return true
 	}
 
@@ -974,6 +1052,7 @@ func (s *Store) BFAdd(key, item string) bool {
 	}
 
 	val.BF.Add(item)
+	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
 	return true
 }
@@ -989,9 +1068,56 @@ func (s *Store) BFExists(key, item string) bool {
 	}
 
 	val, ok := s.data[key]
+	val.LastAccess = time.Now().UnixNano()
+
 	if !ok || val.Type != BFType {
 		return false
 	}
-
+	s.data[key] = val
 	return val.BF.Exists(item)
+}
+
+func (s *Store) EvictOne() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.data) == 0 {
+		return false
+	}
+
+	sampleSize := 5
+	if len(s.data) < sampleSize {
+		sampleSize = len(s.data)
+	}
+
+	//Collect random keys
+	keys := make([]string, 0, sampleSize)
+	for k := range s.data {
+		keys = append(keys, k)
+		if len(keys) >= sampleSize {
+			break
+		}
+	}
+
+	// Find least recently used among sampled keys
+	var lruKey string                         // oldest key
+	var lruTime int64 = time.Now().UnixNano() // oldest time
+
+	for _, k := range keys {
+		val, ok := s.data[k]
+		if !ok {
+			continue
+		}
+		if val.LastAccess < lruTime {
+			lruTime = val.LastAccess
+			lruKey = k
+		}
+	}
+
+	if lruKey != "" {
+		delete(s.data, lruKey)
+		delete(s.ttl, lruKey)
+		return true
+	}
+	return false
 }
