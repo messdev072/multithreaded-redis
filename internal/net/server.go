@@ -2,10 +2,12 @@ package net
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"multithreaded-redis/internal/protocol"
@@ -15,12 +17,24 @@ import (
 type Server struct {
 	addr   string
 	shards *shard.SharedStore
+	ln     net.Listener
+
+	// connection management
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+	wg    sync.WaitGroup
+
+	// lifecycle management
+	stopOnce sync.Once
+	stopCh   chan struct{}
 }
 
 func NewServer(addr string) *Server {
 	s := &Server{
 		addr:   addr,
 		shards: shard.NewSharedStore(8), // 8 shards, adjust as needed
+		conns:  make(map[net.Conn]struct{}),
+		stopCh: make(chan struct{}),
 	}
 
 	// Kick off active expiration for each shard
@@ -38,21 +52,86 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to start server: %w", err)
 	}
-	defer ln.Close()
+	s.ln = ln
+
 	log.Printf("Server started on %s", s.addr)
+	go s.acceptLoop()
+	return nil
+}
+
+func (s *Server) acceptLoop() {
 	for {
-		conn, err := ln.Accept()
+		conn, err := s.ln.Accept()
 		if err != nil {
-			log.Printf("failed to accept connection: %v", err)
-			continue
+			select {
+			case <-s.stopCh:
+				// Server is shutting down
+				return
+			default:
+				log.Printf("failed to accept connection: %v", err)
+				continue
+			}
 		}
+		s.mu.Lock()
+		s.conns[conn] = struct{}{}
+		s.mu.Unlock()
+
+		s.wg.Add(1)
 		go s.handleConn(conn)
 	}
 }
 
+// Shutdown order:
+// 1) stop accepting new connections
+// 2) close current connections to unblock handlers
+// 3) wait for handlers to finish
+// 4) shutdown shards (drain + stop)
+func (s *Server) Shutdown(ctx context.Context) error {
+	var retErr error
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		if s.ln != nil {
+			s.ln.Close()
+		}
+
+		// Close all active connections
+		s.mu.Lock()
+		for c := range s.conns {
+			c.Close()
+		}
+		s.mu.Unlock()
+
+		// Wait for all handlers to finish or context timeout
+		doneCh := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(doneCh)
+		}()
+
+		select {
+		case <-doneCh:
+			// All handlers finished
+		case <-ctx.Done():
+			retErr = ctx.Err()
+		}
+
+		// Shutdown shards
+		if err := s.shards.Shutdown(ctx); err != nil && retErr == nil {
+			retErr = err
+		}
+	})
+	return retErr
+}
+
 // handleConn processes incoming connections and RESP commands
 func (s *Server) handleConn(c net.Conn) {
-	defer c.Close()
+	defer func() {
+		s.mu.Lock()
+		delete(s.conns, c)
+		s.mu.Unlock()
+		c.Close()
+		s.wg.Done()
+	}()
 	r := bufio.NewReader(c)
 
 	for {
@@ -115,9 +194,9 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleHDel(c, v)
 			case "HGETALL":
 				s.handleHGetAll(c, v)
-			case "CMS.INCR":
+			case "CMSINCR":
 				s.handleCMSIncr(c, v)
-			case "CMS.QUERY":
+			case "CMSQUERY":
 				s.handleCMSQuery(c, v)
 			case "LPUSH":
 				s.handleLPush(c, v)
@@ -524,7 +603,7 @@ func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 // CMS.INCR key item count
 func (s *Server) handleCMSIncr(c net.Conn, args protocol.Array) {
 	if len(args) != 4 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMS.INCR'"))))
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMSINCR'"))))
 		return
 	}
 
@@ -544,7 +623,7 @@ func (s *Server) handleCMSIncr(c net.Conn, args protocol.Array) {
 // CMS.QUERY key item
 func (s *Server) handleCMSQuery(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMS.QUERY'"))))
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMSQUERY'"))))
 		return
 	}
 
