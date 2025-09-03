@@ -1,27 +1,37 @@
-package shard
+package store
 
 import (
 	"fmt"
-	"multithreaded-redis/internal/store"
 	"strings"
 	"time"
 )
 
 type Shard struct {
-	Store *store.Store
-	inbox chan ShardRequest
-	quit  chan struct{}
-	done  chan struct{}
+	Store  *Store
+	inbox  chan ShardRequest
+	quit   chan struct{}
+	done   chan struct{}
+	nodeID string
+	parent *SharedStore
 }
 
 type ShardRequest struct {
-	Command string
-	Key     string
-	Args    []string
-	Reply   chan interface{}
+	Command  string
+	Key      string
+	Args     []string
+	Reply    chan interface{}
+	internal bool // mark interbal ops
+	Payload  interface{}
 }
 
-func NewShard(s *store.Store) *Shard {
+type KeyDump struct {
+	Key        string
+	ValueType  int
+	ValueBytes []byte    // serialized value OR we can pass typed fields (choose what's easier for you)
+	TTL        time.Time // zero => no TTL
+}
+
+func NewShard(s *Store) *Shard {
 	shard := &Shard{
 		Store: s,
 		inbox: make(chan ShardRequest, 100),
@@ -35,11 +45,7 @@ func (s *Shard) Run() {
 	defer close(s.done)
 	for {
 		select {
-		case req, ok := <-s.inbox:
-			if !ok {
-				//Inbox channel closed, exit the goroutine
-				return
-			}
+		case req := <-s.inbox:
 			s.handle(req)
 		case <-s.quit:
 			// Drain remaining requests before exiting
@@ -56,6 +62,34 @@ func (s *Shard) Run() {
 }
 
 func (s *Shard) handle(req ShardRequest) {
+	//check if key should live on this shard (ring authoritative)
+	if s.parent != nil && !req.internal {
+		targetNode, _ := s.parent.ring.GetNode(req.Key)
+		if targetNode != "" && targetNode != s.nodeID {
+			//forward request to the correct shard
+			if dest, ok := s.parent.getShardByNodeID(targetNode); ok {
+				//forward : keep req but make sure Reply exists
+				if req.Reply == nil {
+					// if no reply expected, create a temp chan to avoid blocking
+					req.Reply = make(chan interface{}, 1)
+				}
+				dest.inbox <- req
+				//wait for resp and return to original caller
+				resp := req.Reply
+				//write back to reply if this was external
+				if req.Reply != nil {
+					req.Reply <- resp
+				}
+				return
+			} else {
+				// destination not found : return MOVED-like error
+				if req.Reply != nil {
+					req.Reply <- fmt.Errorf("MOVED: key %s should be on node %s", req.Key, targetNode)
+				}
+				return
+			}
+		}
+	}
 	cmd := strings.ToUpper(req.Command)
 
 	switch cmd {
@@ -267,6 +301,47 @@ func (s *Shard) handle(req ShardRequest) {
 		}
 		ok := s.Store.BFExists(req.Key, req.Args[0])
 		req.Reply <- ok
+	case "DUMPKEY":
+		// internal API : return KeyDump or nil
+		val, ok := s.Store.getRaw(req.Key)
+		if !ok {
+			if req.Reply != nil {
+				req.Reply <- nil
+			}
+			return
+		}
+		kd := KeyDump{
+			Key:        req.Key,
+			ValueType:  int(val.Type),
+			ValueBytes: s.Store.serializeValue(val),
+			TTL:        s.Store.getExpirationTime(req.Key),
+		}
+		if req.Reply != nil {
+			req.Reply <- kd
+		}
+		return
+	case "MIGRATE_RESTORE":
+		// expecting Payload to be KeyDump
+		kd, ok := req.Payload.(KeyDump)
+		if !ok {
+			if req.Reply != nil {
+				req.Reply <- fmt.Errorf("bad payload")
+			}
+			return
+		}
+		// restore into s.store preserving TTL
+		s.Store.restoreFromDump(kd)
+		if req.Reply != nil {
+			req.Reply <- true
+		}
+		return
+
+	case "MIGRATE_DELETE":
+		deleted := s.Store.Delete(req.Key)
+		if req.Reply != nil {
+			req.Reply <- deleted
+		}
+		return
 	default:
 		req.Reply <- fmt.Errorf("unknown command: %s", req.Command)
 	}

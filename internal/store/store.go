@@ -1121,3 +1121,17 @@ func (s *Store) EvictOne() bool {
 	}
 	return false
 }
+
+func (s *Store) ScanKeys(batchSize int) []string {
+	s.mu.RLock()
+	keys := make([]string, 0, len(s.data))
+	for k := range s.data {
+		keys = append(keys, k)
+	}
+	s.mu.RUnlock()
+	// return at most batchSize keys
+	if batchSize <= 0 || len(keys) <= batchSize {
+		return keys
+	}
+	return keys[:batchSize]
+}
