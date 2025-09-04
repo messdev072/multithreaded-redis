@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -24,9 +25,9 @@ const (
 
 type Value struct {
 	Type       ValueType
-	Data       []byte              // for strings
-	Set        map[string]struct{} // for sets
-	Hash       map[string]string
+	Data       []byte                        // for strings
+	Set        map[string]struct{}           // for sets
+	Hash       map[string]string             // for hashes
 	CMS        *datastuctures.CountMinSketch // for Count-Min Sketch
 	List       []string
 	ZSet       map[string]float64
@@ -72,6 +73,7 @@ func (s *Store) Set(key string, val []byte, expire time.Duration) {
 	expiration := int64(0)
 
 	s.data[key] = Value{
+		Type:       StringType, // Set the type for string values
 		Data:       val,
 		Expiration: expiration,
 		LastAccess: time.Now().UnixNano(),
@@ -91,10 +93,45 @@ func (s *Store) Get(key string) ([]byte, bool) {
 	defer s.mu.Unlock()
 
 	if s.expired(key) {
+		log.Printf("DEBUG: %s - Found in store but expired", key)
 		return nil, false
 	}
 
 	val, ok := s.data[key]
+	if !ok {
+		log.Printf("DEBUG: %s - Not found in store data map", key)
+		return nil, false
+	}
+
+	switch val.Type {
+	case StringType:
+		log.Printf("DEBUG: %s - Found string value with data %q", key, string(val.Data))
+	case SetType:
+		log.Printf("DEBUG: %s - Found set with %d members", key, len(val.Set))
+	case HashType:
+		log.Printf("DEBUG: %s - Found hash with %d fields", key, len(val.Hash))
+	case CMSType:
+		if val.CMS != nil {
+			log.Printf("DEBUG: %s - Found CMS with width=%d, depth=%d", key, val.CMS.Width, val.CMS.Depth)
+		} else {
+			log.Printf("DEBUG: %s - Found CMS but it is nil", key)
+		}
+	default:
+		log.Printf("DEBUG: %s - Found value of type %d", key, val.Type)
+	}
+
+	if val.Type != StringType {
+		log.Printf("WARNING: %s - Incorrect type in store: got %d, expected %d (StringType)",
+			key, val.Type, StringType)
+		return nil, false
+	}
+
+	// For string values, check that we have data
+	if len(val.Data) == 0 {
+		log.Printf("WARNING: %s - Found with StringType but empty data", key)
+		return nil, false
+	}
+
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
 

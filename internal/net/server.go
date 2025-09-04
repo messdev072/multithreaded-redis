@@ -26,19 +26,28 @@ type Server struct {
 	// lifecycle management
 	stopOnce sync.Once
 	stopCh   chan struct{}
+
+	// debugging flags
+	debug bool
+}
+
+func (s *Server) logDebug(format string, args ...interface{}) {
+	if s.debug {
+		log.Printf(format, args...)
+	}
 }
 
 func NewServer(addr string) *Server {
-	sharedStore := store.NewSharedStore(8) // 8 replicas for consistent hashing
+	sharedStore := store.NewSharedStore(2) // 2 replicas for consistent hashing
 
-	// Create and add 8 shards
-	numShards := 8
+	// Create and add 2 shards
+	numShards := 2
 	for i := 0; i < numShards; i++ {
 		st := store.NewStore()
 		// Start cleaner for each store
 		st.StartCleaner(20, 100000*time.Millisecond)
 		shard := store.NewShard(st)
-		nodeID := fmt.Sprintf("node-%d", i)
+		nodeID := fmt.Sprintf("shard-%d", i)
 		sharedStore.AddNode(nodeID, shard)
 	}
 
@@ -50,6 +59,7 @@ func NewServer(addr string) *Server {
 		mu:       sync.Mutex{},
 		wg:       sync.WaitGroup{},
 		stopOnce: sync.Once{},
+		debug:    true,
 	}
 
 	return s
@@ -163,8 +173,12 @@ func (s *Server) handleConn(c net.Conn) {
 				continue
 			}
 
-			switch string(cmd) {
+			cmdStr := string(cmd)
+			log.Printf("Received command: %s with args: %v", cmdStr, v)
+
+			switch cmdStr {
 			case "PING":
+				log.Printf("Handling PING command")
 				c.Write([]byte(protocol.Encode(protocol.SimpleString("PONG"))))
 			case "SET":
 				s.handleSET(c, v)
@@ -232,6 +246,11 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleBFAdd(c, v)
 			case "BFEXISTS":
 				s.handleBFExists(c, v)
+			case "ADDNODE":
+				log.Printf("Handling ADDNODE command with key: %s", string(v[1].(protocol.BulkString)))
+				s.handleAddNode(c, v)
+			// case "REMOVENODE":
+			// 	s.handleRemoveNode(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}

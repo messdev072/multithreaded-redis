@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -43,6 +44,16 @@ func NewShard(s *Store) *Shard {
 
 func (s *Shard) Run() {
 	defer close(s.done)
+
+	// Signal that we're ready to process requests
+	ready := make(chan interface{}, 1)
+	ready <- struct{}{}
+	s.inbox <- ShardRequest{
+		Command: "_INTERNAL_READY",
+		Reply:   ready,
+	}
+	<-ready
+
 	for {
 		select {
 		case req := <-s.inbox:
@@ -75,7 +86,7 @@ func (s *Shard) handle(req ShardRequest) {
 				}
 				dest.inbox <- req
 				//wait for resp and return to original caller
-				resp := req.Reply
+				resp := <-req.Reply
 				//write back to reply if this was external
 				if req.Reply != nil {
 					req.Reply <- resp
@@ -90,11 +101,14 @@ func (s *Shard) handle(req ShardRequest) {
 			}
 		}
 	}
+
 	cmd := strings.ToUpper(req.Command)
+	log.Printf("DEBUG: %s - Processing %s command in shard %s", req.Key, cmd, s.nodeID)
 
 	switch cmd {
 	case "SET":
 		if len(req.Args) < 1 {
+			log.Printf("ERROR: %s - SET command missing value argument", req.Key)
 			req.Reply <- fmt.Errorf("SET requires at least 1 argument")
 			return
 		}
@@ -103,12 +117,20 @@ func (s *Shard) handle(req ShardRequest) {
 		if len(req.Args) >= 2 {
 			dur, err := time.ParseDuration(req.Args[1])
 			if err != nil {
+				log.Printf("ERROR: %s - Invalid expiration duration: %v", req.Key, err)
 				req.Reply <- fmt.Errorf("invalid duration: %v", err)
 				return
 			}
 			expire = dur
 		}
+		expireStr := ""
+		if expire > 0 {
+			expireStr = fmt.Sprintf(" and expiration %v", expire)
+		}
+		log.Printf("DEBUG: %s - Setting value with length %d bytes%s",
+			req.Key, len(val), expireStr)
 		s.Store.Set(req.Key, val, expire)
+		log.Printf("DEBUG: %s - Successfully set value", req.Key)
 		req.Reply <- "OK"
 	case "GET":
 		val, found := s.Store.Get(req.Key)
@@ -305,17 +327,51 @@ func (s *Shard) handle(req ShardRequest) {
 		// internal API : return KeyDump or nil
 		val, ok := s.Store.getRaw(req.Key)
 		if !ok {
+			log.Printf("DEBUG: %s - Not found in shard during DUMPKEY", req.Key)
 			if req.Reply != nil {
 				req.Reply <- nil
 			}
 			return
 		}
+
+		// Log value details based on type
+		switch val.Type {
+		case StringType:
+			log.Printf("DEBUG: %s - Found in source shard with type=STRING, data=%q", req.Key, string(val.Data))
+		case SetType:
+			log.Printf("DEBUG: %s - Found in source shard with type=SET, members=%d", req.Key, len(val.Set))
+		case HashType:
+			log.Printf("DEBUG: %s - Found in source shard with type=HASH, fields=%d", req.Key, len(val.Hash))
+		case CMSType:
+			if val.CMS != nil {
+				log.Printf("DEBUG: %s - Found in source shard with type=CMS, width=%d, depth=%d",
+					req.Key, val.CMS.Width, val.CMS.Depth)
+			} else {
+				log.Printf("DEBUG: %s - Found in source shard with type=CMS but CMS is nil", req.Key)
+			}
+		default:
+			log.Printf("DEBUG: %s - Found in source shard with type=%d", req.Key, val.Type)
+		}
+
+		valueBytes := s.Store.serializeValue(val)
+		if valueBytes == nil {
+			log.Printf("ERROR: %s - Failed to serialize value", req.Key)
+			if req.Reply != nil {
+				req.Reply <- nil
+			}
+			return
+		}
+
 		kd := KeyDump{
 			Key:        req.Key,
 			ValueType:  int(val.Type),
-			ValueBytes: s.Store.serializeValue(val),
+			ValueBytes: valueBytes,
 			TTL:        s.Store.getExpirationTime(req.Key),
 		}
+
+		log.Printf("DEBUG: %s - Dumped value: type=%d, size=%d bytes",
+			req.Key, kd.ValueType, len(kd.ValueBytes))
+
 		if req.Reply != nil {
 			req.Reply <- kd
 		}
@@ -324,18 +380,28 @@ func (s *Shard) handle(req ShardRequest) {
 		// expecting Payload to be KeyDump
 		kd, ok := req.Payload.(KeyDump)
 		if !ok {
+			log.Printf("DEBUG: %s - Bad payload type for MIGRATE_RESTORE: %T", req.Key, req.Payload)
 			if req.Reply != nil {
 				req.Reply <- fmt.Errorf("bad payload")
 			}
 			return
 		}
+		log.Printf("DEBUG: %s - Starting restore with type=%d, size=%d bytes",
+			kd.Key, kd.ValueType, len(kd.ValueBytes))
+
 		// restore into s.store preserving TTL
-		s.Store.restoreFromDump(kd)
+		if err := s.Store.restoreFromDump(kd); err != nil {
+			log.Printf("ERROR: %s - Failed to restore: %v", kd.Key, err)
+			if req.Reply != nil {
+				req.Reply <- err
+			}
+			return
+		}
+		log.Printf("DEBUG: %s - Successfully restored", kd.Key)
 		if req.Reply != nil {
 			req.Reply <- true
 		}
 		return
-
 	case "MIGRATE_DELETE":
 		deleted := s.Store.Delete(req.Key)
 		if req.Reply != nil {

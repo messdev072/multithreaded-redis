@@ -1,8 +1,11 @@
 package net
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"multithreaded-redis/internal/protocol"
+	"multithreaded-redis/internal/store"
 	"net"
 	"strconv"
 	"time"
@@ -659,3 +662,50 @@ func (s *Server) handleBFExists(c net.Conn, args protocol.Array) {
 		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
 	}
 }
+
+func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ADDNODE' command (expected key)"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	nodeID := string(key)
+	
+	log.Printf("DEBUG: Handling ADDNODE command with key: %s", nodeID)
+	
+	// Create and add the new shard
+	newShard := store.NewShard(store.NewStore())
+	if err := s.shards.AddNode(nodeID, newShard); err != nil {
+		log.Printf("ERROR: Failed to add node %s: %v", nodeID, err)
+		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR failed to add node: %v", err)))))
+		return
+	}
+	
+	// Start migration in background
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.shards.BackgroundMigrateTo(ctx, nodeID, 10); err != nil {
+			log.Printf("ERROR: Background migration for node %s failed: %v", nodeID, err)
+		} else {
+			log.Printf("DEBUG: %s - Background migration completed successfully", nodeID)
+		}
+	}()
+	
+	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+}
+
+// func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
+// 	if len(args) != 2 {
+// 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'REMOVENODE' command (expected key)"))))
+// 		return
+// 	}
+// 	key, _ := args[1].(protocol.BulkString)
+// 	res := s.shards.Execute("REMOVENODE", string(key))
+// 	ok, _ := res.(bool)
+// 	if ok {
+// 		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
+// 	} else {
+// 		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+// 	}
+// }
