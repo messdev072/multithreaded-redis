@@ -78,6 +78,24 @@ func (ss *SharedStore) RemoveNode(nodeID string) {
 	ss.ring.RemoveNode(nodeID)
 }
 
+// RemoveNodeFromRing removes a node from the hash ring only (keeps shard for migration)
+func (ss *SharedStore) RemoveNodeFromRing(nodeID string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.ring.RemoveNode(nodeID)
+}
+
+// RemoveShardOnly removes the shard but assumes node was already removed from ring
+func (ss *SharedStore) RemoveShardOnly(nodeID string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if sh, ok := ss.nodeShards[nodeID]; ok {
+		// signal shard to stop accepting new requests, drain via its Run() quit handling
+		close(sh.quit)
+		delete(ss.nodeShards, nodeID)
+	}
+}
+
 // Internal ultility: getShardForKey (by ring)
 func (ss *SharedStore) getShardForKey(key string, command string) (*Shard, bool) {
 	nodeID, ok := ss.ring.GetNode(key)
@@ -127,6 +145,25 @@ func (ss *SharedStore) getShardByNodeID(nodeID string) (*Shard, bool) {
 	defer ss.mu.RUnlock()
 	sh, ok := ss.nodeShards[nodeID]
 	return sh, ok
+}
+
+// GetShardByNodeID returns the shard for a given node ID (public method)
+func (ss *SharedStore) GetShardByNodeID(nodeID string) (*Shard, bool) {
+	return ss.getShardByNodeID(nodeID)
+}
+
+// GetNodes returns all node IDs in the ring
+func (ss *SharedStore) GetNodes() []string {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.ring.Nodes()
+}
+
+// GetNodeForKey returns the node ID that should handle a given key
+func (ss *SharedStore) GetNodeForKey(key string) (string, bool) {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.ring.GetNode(key)
 }
 
 func (ss *SharedStore) Execute(cmd string, key string, args ...string) interface{} {

@@ -249,8 +249,8 @@ func (s *Server) handleConn(c net.Conn) {
 			case "ADDNODE":
 				log.Printf("Handling ADDNODE command with key: %s", string(v[1].(protocol.BulkString)))
 				s.handleAddNode(c, v)
-			// case "REMOVENODE":
-			// 	s.handleRemoveNode(c, v)
+			case "REMOVENODE":
+				s.handleRemoveNode(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}

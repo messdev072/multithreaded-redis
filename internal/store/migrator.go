@@ -152,9 +152,9 @@ func (ss *SharedStore) BackgroundMigrateTo(ctx context.Context, destNode string,
 				// MIGRATE_DELETE -> source (must be sent to srcShard, not destShard)
 				delReq := ShardRequest{
 					Command:  "MIGRATE_DELETE",
-					Key:     k,
-					Reply:   make(chan interface{}, 1),
-					internal: true,  // mark as internal to prevent rerouting
+					Key:      k,
+					Reply:    make(chan interface{}, 1),
+					internal: true, // mark as internal to prevent rerouting
 				}
 				// Send delete to source shard where the key originally was
 				srcShard.inbox <- delReq
@@ -186,4 +186,75 @@ func (ss *SharedStore) BackgroundMigrateTo(ctx context.Context, destNode string,
 	}
 	log.Printf("Migration completed: %d/%d keys processed", migratedKeys, totalKeys)
 	return nil
+}
+
+// MigrateKeysBatch migrates multiple keys from source shard to target shard in batch
+func (ss *SharedStore) MigrateKeysBatch(srcShard, destShard *Shard, keys []string, srcNodeID, destNodeID string) int {
+	if len(keys) == 0 {
+		return 0
+	}
+
+	log.Printf("DEBUG: Starting batch migration of %d keys from %s to %s", len(keys), srcNodeID, destNodeID)
+
+	// Collect all key-value pairs and TTLs in batch
+	type keyData struct {
+		key    string
+		value  []byte
+		expire time.Duration
+	}
+
+	var batch []keyData
+	for _, key := range keys {
+		value, exists := srcShard.Store.Get(key)
+		if !exists {
+			log.Printf("DEBUG: Key %s not found in source shard %s during batch migration", key, srcNodeID)
+			continue
+		}
+
+		// Get TTL if any
+		ttl := srcShard.Store.TTL(key)
+		var expire time.Duration
+		if ttl > 0 {
+			expire = time.Duration(ttl) * time.Second
+		}
+
+		batch = append(batch, keyData{
+			key:    key,
+			value:  value,
+			expire: expire,
+		})
+	}
+
+	if len(batch) == 0 {
+		log.Printf("DEBUG: No valid keys found for batch migration from %s to %s", srcNodeID, destNodeID)
+		return 0
+	}
+
+	// Set all values in destination shard
+	successCount := 0
+	for _, item := range batch {
+		destShard.Store.Set(item.key, item.value, item.expire)
+		successCount++
+	}
+	log.Printf("DEBUG: Set %d keys in destination shard %s", successCount, destNodeID)
+
+	// Delete all keys from source shard in batch
+	deletedCount := 0
+	for _, item := range batch {
+		if srcShard.Store.Delete(item.key) {
+			deletedCount++
+		} else {
+			log.Printf("WARNING: Failed to delete key %s from source %s during batch migration", item.key, srcNodeID)
+		}
+	}
+
+	log.Printf("DEBUG: Successfully migrated %d keys from %s to %s (deleted %d from source)",
+		successCount, srcNodeID, destNodeID, deletedCount)
+
+	return successCount
+}
+
+// MigrateKey migrates a single key from source shard to target shard
+func (ss *SharedStore) MigrateKey(srcShard, destShard *Shard, key, srcNodeID, destNodeID string) bool {
+	return ss.MigrateKeysBatch(srcShard, destShard, []string{key}, srcNodeID, destNodeID) > 0
 }

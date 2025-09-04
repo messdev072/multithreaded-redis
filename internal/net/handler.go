@@ -670,9 +670,9 @@ func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	nodeID := string(key)
-	
+
 	log.Printf("DEBUG: Handling ADDNODE command with key: %s", nodeID)
-	
+
 	// Create and add the new shard
 	newShard := store.NewShard(store.NewStore())
 	if err := s.shards.AddNode(nodeID, newShard); err != nil {
@@ -680,7 +680,7 @@ func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR failed to add node: %v", err)))))
 		return
 	}
-	
+
 	// Start migration in background
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -691,21 +691,97 @@ func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
 			log.Printf("DEBUG: %s - Background migration completed successfully", nodeID)
 		}
 	}()
-	
+
 	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
 }
 
-// func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
-// 	if len(args) != 2 {
-// 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'REMOVENODE' command (expected key)"))))
-// 		return
-// 	}
-// 	key, _ := args[1].(protocol.BulkString)
-// 	res := s.shards.Execute("REMOVENODE", string(key))
-// 	ok, _ := res.(bool)
-// 	if ok {
-// 		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
-// 	} else {
-// 		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
-// 	}
-// }
+func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
+	if len(args) != 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'REMOVENODE' command (expected key)"))))
+		return
+	}
+	key, _ := args[1].(protocol.BulkString)
+	nodeID := string(key)
+
+	log.Printf("DEBUG: Handling REMOVENODE command for node: %s", nodeID)
+
+	// Check if the node exists
+	if _, exists := s.shards.GetShardByNodeID(nodeID); !exists {
+		log.Printf("ERROR: Node %s does not exist", nodeID)
+		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR node %s does not exist", nodeID)))))
+		return
+	}
+
+	// Before removing the node, we need to migrate its data to other nodes
+	if shard, ok := s.shards.GetShardByNodeID(nodeID); ok {
+		// Get all keys from the node that's being removed
+		keys := shard.Store.ScanKeys(-1) // Get all keys
+		log.Printf("DEBUG: Node %s has %d keys to migrate before removal", nodeID, len(keys))
+
+		// Migrate each key to other nodes
+		if len(keys) > 0 {
+			// FIRST: Remove the node from hash ring so GetNodeForKey works correctly
+			s.shards.RemoveNodeFromRing(nodeID)
+			log.Printf("DEBUG: Removed node %s from hash ring", nodeID)
+
+			// Group keys by their target nodes based on updated hash ring
+			keysByTargetNode := make(map[string][]string)
+
+			for _, key := range keys {
+				// Hash key to determine which remaining node it should go to
+				targetNode, ok := s.shards.GetNodeForKey(key)
+				if !ok {
+					log.Printf("WARNING: Could not determine target node for key %s", key)
+					continue
+				}
+
+				// Skip if the target is the node being removed (shouldn't happen after removal from ring)
+				if targetNode == nodeID {
+					log.Printf("WARNING: Key %s still maps to removed node %s", key, nodeID)
+					continue
+				}
+
+				keysByTargetNode[targetNode] = append(keysByTargetNode[targetNode], key)
+			}
+
+			log.Printf("DEBUG: Keys distribution for migration: %v", keysByTargetNode)
+
+			// Migrate keys to their respective target nodes in batches
+			totalMigrated := 0
+			for targetNode, keysToMigrate := range keysByTargetNode {
+				if len(keysToMigrate) == 0 {
+					continue
+				}
+
+				log.Printf("DEBUG: Migrating %d keys from %s to %s", len(keysToMigrate), nodeID, targetNode)
+
+				// Get target shard
+				targetShard, ok := s.shards.GetShardByNodeID(targetNode)
+				if !ok {
+					log.Printf("ERROR: Target shard %s not found", targetNode)
+					continue
+				}
+
+				// Migrate keys in batch to this target node
+				migratedCount := s.shards.MigrateKeysBatch(shard, targetShard, keysToMigrate, nodeID, targetNode)
+				totalMigrated += migratedCount
+				log.Printf("DEBUG: Successfully migrated %d keys from %s to %s", migratedCount, nodeID, targetNode)
+			}
+
+			log.Printf("DEBUG: Total keys migrated from %s: %d/%d", nodeID, totalMigrated, len(keys))
+		} else {
+			// No keys to migrate, just remove from ring
+			s.shards.RemoveNodeFromRing(nodeID)
+			log.Printf("DEBUG: Removed node %s from hash ring (no keys to migrate)", nodeID)
+		}
+
+		// FINALLY: Remove the shard itself
+		s.shards.RemoveShardOnly(nodeID)
+	} else {
+		// Node not found, just remove from ring if it exists
+		s.shards.RemoveNodeFromRing(nodeID)
+	}
+	log.Printf("DEBUG: Successfully removed node %s", nodeID)
+
+	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+}
