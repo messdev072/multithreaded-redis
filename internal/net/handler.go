@@ -683,7 +683,7 @@ func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
 
 	// Start migration in background
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		if err := s.shards.BackgroundMigrateTo(ctx, nodeID, 10); err != nil {
 			log.Printf("ERROR: Background migration for node %s failed: %v", nodeID, err)
@@ -782,6 +782,116 @@ func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
 		s.shards.RemoveNodeFromRing(nodeID)
 	}
 	log.Printf("DEBUG: Successfully removed node %s", nodeID)
+
+	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+}
+
+// Handle PUBLISH command: PUBLISH channel message
+func (s *Server) handlePublish(c net.Conn, args protocol.Array) {
+	if len(args) != 3 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'PUBLISH' command"))))
+		return
+	}
+
+	channel := string(args[1].(protocol.BulkString))
+	message := string(args[2].(protocol.BulkString))
+
+	log.Printf("DEBUG: Publishing message to channel %s: %s", channel, message)
+	count := s.pubsub.Publish(channel, message)
+
+	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+}
+
+// Handle SUBSCRIBE command: SUBSCRIBE channel [channel ...]
+func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
+	if len(args) < 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SUBSCRIBE' command"))))
+		return
+	}
+
+	channels := make([]string, 0, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		channels = append(channels, string(args[i].(protocol.BulkString)))
+	}
+
+	log.Printf("DEBUG: Subscribing to channels: %v", channels)
+
+	// Create a channel for this subscription
+	msgCh := make(chan store.PubSubMessage, 100) // Buffer to prevent blocking
+
+	// Subscribe to all channels
+	s.pubsub.Subscribe(channels, msgCh)
+
+	// Send subscription confirmations
+	for i, channel := range channels {
+		// Send subscribe confirmation: ["subscribe", channel, num_subscriptions]
+		response := protocol.Array{
+			protocol.BulkString("subscribe"),
+			protocol.BulkString(channel),
+			protocol.Integer(i + 1), // subscription count
+		}
+		c.Write([]byte(protocol.Encode(response)))
+	}
+
+	// Enter subscription mode - listen for messages
+	go func() {
+		defer func() {
+			// Cleanup: unsubscribe from all channels when connection closes
+			s.pubsub.Unsubscribe(channels, msgCh)
+			close(msgCh)
+		}()
+
+		for {
+			select {
+			case message, ok := <-msgCh:
+				if !ok {
+					return // Channel closed
+				}
+
+				// Send message to client: ["message", channel, message]
+				response := protocol.Array{
+					protocol.BulkString("message"),
+					protocol.BulkString(message.Channel),
+					protocol.BulkString(message.Message),
+				}
+				if _, err := c.Write([]byte(protocol.Encode(response))); err != nil {
+					log.Printf("Failed to send message to subscriber: %v", err)
+					return
+				}
+			case <-s.stopCh:
+				return // Server shutting down
+			}
+		}
+	}()
+}
+
+// Handle UNSUBSCRIBE command: UNSUBSCRIBE [channel [channel ...]]
+func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
+	// For now, we'll implement a simple version that doesn't track individual connection subscriptions
+	// In a full implementation, you'd need to track which channels each connection is subscribed to
+
+	if len(args) == 1 {
+		// Unsubscribe from all channels - not implemented in this simple version
+		c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+		return
+	}
+
+	channels := make([]string, 0, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		channels = append(channels, string(args[i].(protocol.BulkString)))
+	}
+
+	log.Printf("DEBUG: Unsubscribing from channels: %v", channels)
+
+	// Send unsubscribe confirmations
+	for i, channel := range channels {
+		response := protocol.Array{
+			protocol.BulkString("unsubscribe"),
+			protocol.BulkString(channel),
+			protocol.Integer(len(channels) - i - 1), // remaining subscription count
+		}
+		c.Write([]byte(protocol.Encode(response)))
+	}
 
 	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
 }

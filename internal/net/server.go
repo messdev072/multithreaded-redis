@@ -16,6 +16,7 @@ import (
 type Server struct {
 	addr   string
 	shards *store.SharedStore
+	pubsub *store.PubSub
 	ln     net.Listener
 
 	// connection management
@@ -29,12 +30,6 @@ type Server struct {
 
 	// debugging flags
 	debug bool
-}
-
-func (s *Server) logDebug(format string, args ...interface{}) {
-	if s.debug {
-		log.Printf(format, args...)
-	}
 }
 
 func NewServer(addr string) *Server {
@@ -54,6 +49,7 @@ func NewServer(addr string) *Server {
 	s := &Server{
 		addr:     addr,
 		shards:   sharedStore,
+		pubsub:   store.NewPubSub(),
 		conns:    make(map[net.Conn]struct{}),
 		stopCh:   make(chan struct{}),
 		mu:       sync.Mutex{},
@@ -251,6 +247,12 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleAddNode(c, v)
 			case "REMOVENODE":
 				s.handleRemoveNode(c, v)
+			case "SUBSCRIBE":
+				s.handleSubscribe(c, v)
+			case "UNSUBSCRIBE":
+				s.handleUnsubscribe(c, v)
+			case "PUBLISH":
+				s.handlePublish(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}

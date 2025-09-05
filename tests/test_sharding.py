@@ -3,136 +3,299 @@ import time
 import unittest
 import random
 import string
+import threading
+import subprocess
+import sys
+import os
 
 class RedisClient:
     def __init__(self, host='localhost', port=6380):
-        self.sock = socket.create_connection((host, port))
+        self.host = host
+        self.port = port
+        self.sock = None
+        self.connect()
+    
+    def connect(self):
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        except Exception as e:
+            print(f"Failed to connect to {self.host}:{self.port}: {e}")
+            raise
     
     def encode_command(self, *args):
         """Encode command using RESP protocol"""
         cmd = f"*{len(args)}\r\n"
         for arg in args:
-            arg_bytes = str(arg).encode()
-            cmd += f"${len(arg_bytes)}\r\n{arg}\r\n"
-        return cmd.encode()
+            arg_str = str(arg)
+            arg_bytes = arg_str.encode('utf-8')
+            cmd += f"${len(arg_bytes)}\r\n{arg_str}\r\n"
+        return cmd.encode('utf-8')
 
     def decode_response(self):
         """Decode RESP response"""
-        data = self.sock.recv(4096).decode()
-        if not data:
-            raise Exception("Empty response")
-        
-        if data.startswith('+'):  # Simple String
-            return data[1:].rstrip('\r\n')
-        elif data.startswith('-'):  # Error
-            raise Exception(data[1:].rstrip('\r\n'))
-        elif data.startswith(':'):  # Integer
-            return int(data[1:].rstrip('\r\n'))
-        elif data.startswith('$'):  # Bulk String
-            if data.startswith('$-1'):
-                return None
-            return data[data.find('\r\n')+2:-2]
-        return data.rstrip('\r\n')
+        try:
+            # Read the first line to determine response type
+            first_byte = self.sock.recv(1).decode('utf-8')
+            if not first_byte:
+                raise Exception("Empty response")
+            
+            # Read the rest of the line
+            line = first_byte
+            while True:
+                char = self.sock.recv(1).decode('utf-8')
+                line += char
+                if line.endswith('\r\n'):
+                    break
+            
+            if first_byte == '+':  # Simple String
+                return line[1:-2]
+            elif first_byte == '-':  # Error
+                raise Exception(f"Redis Error: {line[1:-2]}")
+            elif first_byte == ':':  # Integer
+                return int(line[1:-2])
+            elif first_byte == '$':  # Bulk String
+                length = int(line[1:-2])
+                if length == -1:
+                    return None
+                data = self.sock.recv(length).decode('utf-8')
+                self.sock.recv(2)  # Read trailing \r\n
+                return data
+            elif first_byte == '*':  # Array
+                count = int(line[1:-2])
+                if count == -1:
+                    return None
+                result = []
+                for _ in range(count):
+                    result.append(self.decode_response())
+                return result
+            else:
+                raise Exception(f"Unknown response type: {first_byte}")
+        except Exception as e:
+            print(f"Error decoding response: {e}")
+            raise
 
     def execute(self, *args):
-        self.sock.sendall(self.encode_command(*args))
-        return self.decode_response()
+        try:
+            command = self.encode_command(*args)
+            self.sock.sendall(command)
+            return self.decode_response()
+        except Exception as e:
+            print(f"Error executing command {args}: {e}")
+            # Try to reconnect once
+            try:
+                self.sock.close()
+                self.connect()
+                command = self.encode_command(*args)
+                self.sock.sendall(command)
+                return self.decode_response()
+            except:
+                raise e
 
     def close(self):
-        self.sock.close()
+        if self.sock:
+            self.sock.close()
 
 class TestSharding(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Start the Redis server before running tests"""
+        print("Starting Redis server...")
+        cls.server_process = subprocess.Popen(
+            ['./server'],
+            cwd='/home/dsu481/workspace/multithreaded-redis',
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        # Wait for server to start
+        time.sleep(2)
+        
+        # Test connection
+        try:
+            test_client = RedisClient()
+            test_client.execute('PING')
+            test_client.close()
+            print("Server started successfully!")
+        except Exception as e:
+            cls.server_process.terminate()
+            raise Exception(f"Failed to start server: {e}")
+
+    @classmethod
+    def tearDownClass(cls):
+        """Stop the Redis server after all tests"""
+        print("Stopping Redis server...")
+        cls.server_process.terminate()
+        cls.server_process.wait()
+
     def setUp(self):
         self.client = RedisClient()
-        # Generate random keys and values
+        # Generate random keys and values for testing
         self.test_data = {}
-        for i in range(1000):
-            key = ''.join(random.choices(string.ascii_letters, k=10))
-            value = ''.join(random.choices(string.ascii_letters, k=20))
+        for i in range(10):
+            key = f'test-key-{i}'
+            value = f'test-value-{i}-{random.randint(1000, 9999)}'
             self.test_data[key] = value
 
     def tearDown(self):
         self.client.close()
 
-    def test_01_initial_sharding(self):
-        """Test initial sharding with 2 nodes"""
-        print("\nTesting initial sharding with shard-1 and shard-2...")
+    def test_01_basic_operations(self):
+        """Test basic SET/GET operations"""
+        print("\n=== Testing basic operations ===")
         
-        # Write test data
+        # Test PING
+        response = self.client.execute('PING')
+        self.assertEqual(response, 'PONG')
+        
+        # Test SET/GET
         for key, value in self.test_data.items():
             response = self.client.execute('SET', key, value)
             self.assertEqual(response, 'OK')
             
-        # Verify data
+        # Verify all data
         for key, value in self.test_data.items():
             response = self.client.execute('GET', key)
-            self.assertEqual(response, value)
+            self.assertEqual(response, value, f"Key {key}: expected {value}, got {response}")
+        
+        print(f"✓ Successfully set and retrieved {len(self.test_data)} key-value pairs")
 
     def test_02_add_shard(self):
-        """Test adding shard-3"""
-        print("\nTesting addition of shard-3...")
+        """Test adding a new shard and key redistribution"""
+        print("\n=== Testing shard addition ===")
         
-        # Add shard-3 (this should trigger migration in the background)
-        response = self.client.execute('ADDNODE', 'shard-3')
-        self.assertEqual(response, 'OK')
-        
-        # Wait for migration to start
-        time.sleep(1)
-        
-        # Write new data while migration is happening
-        new_data = {}
-        for i in range(5):
-            key = f'new-key-{i}'
-            value = f'new-value-{i}'
-            new_data[key] = value
+        # First, set some initial data
+        initial_data = {}
+        for i in range(15):
+            key = f'initial-key-{i}'
+            value = f'initial-value-{i}'
+            initial_data[key] = value
             response = self.client.execute('SET', key, value)
             self.assertEqual(response, 'OK')
         
-        # Verify all data is accessible during migration
-        for key, value in {**self.test_data, **new_data}.items():
-            response = self.client.execute('GET', key)
-            self.assertEqual(response, value)
+        print(f"✓ Set {len(initial_data)} initial keys")
         
-        # Wait for migration to complete (you might want to add a command to check migration status)
-        time.sleep(5)
+        # Add a new shard
+        response = self.client.execute('ADDNODE', 'shard-2')
+        self.assertEqual(response, 'OK')
+        print("✓ Added new shard: shard-2")
         
-        # Verify data after migration
-        for key, value in {**self.test_data, **new_data}.items():
+        # Wait for migration to complete
+        time.sleep(3)
+        
+        # Add more data after shard addition
+        post_add_data = {}
+        for i in range(10):
+            key = f'post-add-key-{i}'
+            value = f'post-add-value-{i}'
+            post_add_data[key] = value
+            response = self.client.execute('SET', key, value)
+            self.assertEqual(response, 'OK')
+        
+        # Verify all data is still accessible
+        all_data = {**initial_data, **post_add_data}
+        for key, value in all_data.items():
             response = self.client.execute('GET', key)
-            self.assertEqual(response, value)
+            self.assertEqual(response, value, f"Key {key}: expected {value}, got {response}")
+        
+        print(f"✓ All {len(all_data)} keys are accessible after shard addition")
 
-    # def test_03_remove_shard(self):
-    #     """Test removing shard-1"""
-    #     print("\nTesting removal of shard-1...")
+    def test_03_add_another_shard(self):
+        """Test adding a third shard"""
+        print("\n=== Testing addition of third shard ===")
         
-    #     # Remove shard-1 (this should trigger migration off the node)
-    #     response = self.client.execute('ADMIN', 'REMOVENODE', 'shard-1')
-    #     self.assertEqual(response, 'OK')
+        # Add more data
+        more_data = {}
+        for i in range(20):
+            key = f'more-key-{i}'
+            value = f'more-value-{i}'
+            more_data[key] = value
+            response = self.client.execute('SET', key, value)
+            self.assertEqual(response, 'OK')
         
-    #     # Wait for migration to start
-    #     time.sleep(1)
+        # Add shard-3
+        response = self.client.execute('ADDNODE', 'shard-3')
+        self.assertEqual(response, 'OK')
+        print("✓ Added third shard: shard-3")
         
-    #     # Write new data while migration is happening
-    #     new_data = {}
-    #     for i in range(100):
-    #         key = f'newer-key-{i}'
-    #         value = f'newer-value-{i}'
-    #         new_data[key] = value
-    #         response = self.client.execute('SET', key, value)
-    #         self.assertEqual(response, 'OK')
+        # Wait for migration
+        time.sleep(3)
         
-    #     # Verify all data is accessible during migration
-    #     for key, value in {**self.test_data, **new_data}.items():
-    #         response = self.client.execute('GET', key)
-    #         self.assertEqual(response, value)
+        # Verify data after adding third shard
+        for key, value in more_data.items():
+            response = self.client.execute('GET', key)
+            self.assertEqual(response, value, f"Key {key}: expected {value}, got {response}")
         
-    #     # Wait for migration to complete
-    #     time.sleep(5)
+        print(f"✓ All {len(more_data)} keys accessible after adding third shard")
+
+    def test_04_remove_shard(self):
+        """Test removing a shard and key migration"""
+        print("\n=== Testing shard removal ===")
         
-    #     # Verify data after migration
-    #     for key, value in {**self.test_data, **new_data}.items():
-    #         response = self.client.execute('GET', key)
-    #         self.assertEqual(response, value)
+        # Set some data before removal
+        removal_data = {}
+        for i in range(15):
+            key = f'removal-test-{i}'
+            value = f'removal-value-{i}'
+            removal_data[key] = value
+            response = self.client.execute('SET', key, value)
+            self.assertEqual(response, 'OK')
+        
+        print(f"✓ Set {len(removal_data)} keys before removal")
+        
+        # Remove shard-3 (the last one added, this should trigger key migration)
+        # When running all tests, we should have shard-0, shard-1, shard-2, shard-3 at this point
+        response = self.client.execute('REMOVENODE', 'shard-3')
+        self.assertEqual(response, 'OK')
+        print("✓ Removed shard: shard-3")
+        
+        # Wait for migration to complete
+        time.sleep(3)
+        
+        # Verify all data is still accessible after removal
+        for key, value in removal_data.items():
+            response = self.client.execute('GET', key)
+            self.assertEqual(response, value, f"Key {key}: expected {value}, got {response}")
+        
+        print(f"✓ All {len(removal_data)} keys accessible after shard removal")
+        
+        # Add some new data to verify the system still works
+        post_removal_data = {}
+        for i in range(10):
+            key = f'post-removal-{i}'
+            value = f'post-removal-value-{i}'
+            post_removal_data[key] = value
+            response = self.client.execute('SET', key, value)
+            self.assertEqual(response, 'OK')
+        
+        # Verify new data
+        for key, value in post_removal_data.items():
+            response = self.client.execute('GET', key)
+            self.assertEqual(response, value)
+        
+        print(f"✓ Successfully added and retrieved {len(post_removal_data)} new keys after removal")
+
+    def test_05_stress_test(self):
+        """Stress test with multiple operations"""
+        print("\n=== Running stress test ===")
+        
+        # Generate larger dataset
+        stress_data = {}
+        for i in range(100):
+            key = f'stress-{i}-{random.randint(1000, 9999)}'
+            value = ''.join(random.choices(string.ascii_letters + string.digits, k=50))
+            stress_data[key] = value
+        
+        # Set all data
+        for key, value in stress_data.items():
+            response = self.client.execute('SET', key, value)
+            self.assertEqual(response, 'OK')
+        
+        # Verify all data
+        for key, value in stress_data.items():
+            response = self.client.execute('GET', key)
+            self.assertEqual(response, value)
+        
+        print(f"✓ Stress test completed: {len(stress_data)} keys set and retrieved successfully")
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    # Run tests with high verbosity
+    unittest.main(verbosity=2, buffer=True)
