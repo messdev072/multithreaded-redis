@@ -41,6 +41,7 @@ type Store struct {
 	data    map[string]Value
 	ttl     map[string]time.Time
 	ttlKeys []string // for random sampling
+	aof     *AOF     // Append Only File for persistence
 }
 
 func (s *Store) expired(key string) bool {
@@ -65,6 +66,30 @@ func NewStore() *Store {
 	}
 }
 
+// NewStoreWithAOF creates a new Store with AOF persistence enabled
+func NewStoreWithAOF(aofPath string) (*Store, error) {
+	aof, err := NewAOF(aofPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	return &Store{
+		data: make(map[string]Value),
+		ttl:  make(map[string]time.Time),
+		aof:  aof,
+	}, nil
+}
+
+// logToAOF appends a command to the AOF if AOF is enabled
+func (s *Store) logToAOF(cmd string, args ...string) {
+	if s.aof != nil {
+		err := s.aof.Append(cmd, args...)
+		if err != nil {
+			log.Printf("ERROR: Failed to write to AOF: %v", err)
+		}
+	}
+}
+
 func (s *Store) Set(key string, val []byte, expire time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -86,6 +111,9 @@ func (s *Store) Set(key string, val []byte, expire time.Duration) {
 	} else {
 		delete(s.ttl, key)
 	}
+	
+	// Log to AOF
+	s.logToAOF("SET", key, string(val))
 }
 
 func (s *Store) Get(key string) ([]byte, bool) {
@@ -149,6 +177,10 @@ func (s *Store) Delete(key string) bool {
 	if exists {
 		delete(s.data, key)
 		delete(s.ttl, key)
+		
+		// Log to AOF
+		s.logToAOF("DEL", key)
+		
 		return true
 	}
 
@@ -600,10 +632,15 @@ func (s *Store) HSet(key, field, value string) int {
 	_, exists := val.Hash[field]
 	val.Hash[field] = value
 	if !exists {
+		// Log to AOF
+		s.logToAOF("HSET", key, field, value)
 		return 0
 	}
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
+	
+	// Log to AOF
+	s.logToAOF("HSET", key, field, value)
 	return 1
 }
 
@@ -1171,4 +1208,12 @@ func (s *Store) ScanKeys(batchSize int) []string {
 		return keys
 	}
 	return keys[:batchSize]
+}
+
+// Close closes the store and AOF file if enabled
+func (s *Store) Close() error {
+	if s.aof != nil {
+		return s.aof.Close()
+	}
+	return nil
 }

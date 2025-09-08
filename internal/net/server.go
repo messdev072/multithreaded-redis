@@ -39,13 +39,25 @@ type Server struct {
 	debug bool
 }
 
-func NewServer(addr string) *Server {
+// NewServer creates a new server with AOF persistence (AOF is now mandatory)
+func NewServer(addr, aofPath string) (*Server, error) {
+	return NewServerWithAOF(addr, aofPath)
+}
+
+// NewServerWithAOF creates a new server with AOF persistence enabled
+func NewServerWithAOF(addr, aofPath string) (*Server, error) {
 	sharedStore := store.NewSharedStore(2) // 2 replicas for consistent hashing
 
-	// Create and add 2 shards
+	// Create and add 2 shards with AOF enabled
 	numShards := 2
 	for i := 0; i < numShards; i++ {
-		st := store.NewStore()
+		// Create AOF path for each shard
+		shardAOFPath := fmt.Sprintf("%s.shard-%d", aofPath, i)
+		st, err := store.NewStoreWithAOF(shardAOFPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create store with AOF for shard %d: %v", i, err)
+		}
+
 		// Start cleaner for each store
 		st.StartCleaner(20, 100000*time.Millisecond)
 		shard := store.NewShard(st)
@@ -66,7 +78,7 @@ func NewServer(addr string) *Server {
 		debug:      true,
 	}
 
-	return s
+	return s, nil
 }
 
 func (s *Server) Start() error {

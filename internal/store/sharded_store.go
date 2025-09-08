@@ -223,6 +223,13 @@ func (ss *SharedStore) Shutdown(ctx context.Context) error {
 	}
 	ss.mu.RUnlock()
 
+	// Close all stores (for AOF files)
+	for _, shard := range shards {
+		if err := shard.Store.Close(); err != nil {
+			log.Printf("Error closing store for shard: %v", err)
+		}
+	}
+
 	for _, shard := range shards {
 		close(shard.quit)
 	}
