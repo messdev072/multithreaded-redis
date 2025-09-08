@@ -13,6 +13,12 @@ import (
 	"multithreaded-redis/internal/store"
 )
 
+type ConnectionState struct {
+	msgCh    chan store.PubSubMessage
+	channels map[string]bool // tracks which channels this connection is subscribed to
+	mu       sync.RWMutex
+}
+
 type Server struct {
 	addr   string
 	shards *store.SharedStore
@@ -20,9 +26,10 @@ type Server struct {
 	ln     net.Listener
 
 	// connection management
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
-	wg    sync.WaitGroup
+	mu         sync.RWMutex
+	conns      map[net.Conn]struct{}
+	connStates map[net.Conn]*ConnectionState // tracks subscription state per connection
+	wg         sync.WaitGroup
 
 	// lifecycle management
 	stopOnce sync.Once
@@ -47,15 +54,16 @@ func NewServer(addr string) *Server {
 	}
 
 	s := &Server{
-		addr:     addr,
-		shards:   sharedStore,
-		pubsub:   store.NewPubSub(),
-		conns:    make(map[net.Conn]struct{}),
-		stopCh:   make(chan struct{}),
-		mu:       sync.Mutex{},
-		wg:       sync.WaitGroup{},
-		stopOnce: sync.Once{},
-		debug:    true,
+		addr:       addr,
+		shards:     sharedStore,
+		pubsub:     store.NewPubSub(),
+		conns:      make(map[net.Conn]struct{}),
+		connStates: make(map[net.Conn]*ConnectionState),
+		stopCh:     make(chan struct{}),
+		mu:         sync.RWMutex{},
+		wg:         sync.WaitGroup{},
+		stopOnce:   sync.Once{},
+		debug:      true,
 	}
 
 	return s
@@ -88,6 +96,9 @@ func (s *Server) acceptLoop() {
 		}
 		s.mu.Lock()
 		s.conns[conn] = struct{}{}
+		s.connStates[conn] = &ConnectionState{
+			channels: make(map[string]bool),
+		}
 		s.mu.Unlock()
 
 		s.wg.Add(1)
@@ -141,6 +152,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) handleConn(c net.Conn) {
 	defer func() {
 		s.mu.Lock()
+		// Cleanup connection state and unsubscribe from all channels
+		if state, exists := s.connStates[c]; exists {
+			if state.msgCh != nil {
+				// Get all subscribed channels
+				state.mu.RLock()
+				channels := make([]string, 0, len(state.channels))
+				for channel := range state.channels {
+					channels = append(channels, channel)
+				}
+				state.mu.RUnlock()
+
+				// Unsubscribe from all channels
+				if len(channels) > 0 {
+					s.pubsub.Unsubscribe(channels, state.msgCh)
+				}
+				close(state.msgCh)
+			}
+			delete(s.connStates, c)
+		}
 		delete(s.conns, c)
 		s.mu.Unlock()
 		c.Close()

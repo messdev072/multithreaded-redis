@@ -816,82 +816,157 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 
 	log.Printf("DEBUG: Subscribing to channels: %v", channels)
 
-	// Create a channel for this subscription
-	msgCh := make(chan store.PubSubMessage, 100) // Buffer to prevent blocking
+	// Get or create connection state
+	s.mu.Lock()
+	state, exists := s.connStates[c]
+	if !exists {
+		state = &ConnectionState{
+			channels: make(map[string]bool),
+		}
+		s.connStates[c] = state
+	}
+	
+	// Initialize message channel if not already done
+	if state.msgCh == nil {
+		state.msgCh = make(chan store.PubSubMessage, 100)
+	}
+	s.mu.Unlock()
 
 	// Subscribe to all channels
-	s.pubsub.Subscribe(channels, msgCh)
+	s.pubsub.Subscribe(channels, state.msgCh)
+
+	// Update connection state
+	state.mu.Lock()
+	totalSubscriptions := len(state.channels)
+	for _, channel := range channels {
+		if !state.channels[channel] {
+			state.channels[channel] = true
+			totalSubscriptions++
+		}
+	}
+	state.mu.Unlock()
 
 	// Send subscription confirmations
-	for i, channel := range channels {
+	currentCount := totalSubscriptions - len(channels) + 1
+	for _, channel := range channels {
 		// Send subscribe confirmation: ["subscribe", channel, num_subscriptions]
 		response := protocol.Array{
 			protocol.BulkString("subscribe"),
 			protocol.BulkString(channel),
-			protocol.Integer(i + 1), // subscription count
+			protocol.Integer(currentCount),
 		}
 		c.Write([]byte(protocol.Encode(response)))
+		currentCount++
 	}
 
-	// Enter subscription mode - listen for messages
-	go func() {
-		defer func() {
-			// Cleanup: unsubscribe from all channels when connection closes
-			s.pubsub.Unsubscribe(channels, msgCh)
-			close(msgCh)
-		}()
+	// Start message listener if this is the first subscription for this connection
+	state.mu.RLock()
+	isFirstSubscription := len(state.channels) == len(channels)
+	state.mu.RUnlock()
 
-		for {
-			select {
-			case message, ok := <-msgCh:
-				if !ok {
-					return // Channel closed
-				}
+	if isFirstSubscription {
+		// Enter subscription mode - listen for messages
+		go func() {
+			for {
+				select {
+				case message, ok := <-state.msgCh:
+					if !ok {
+						return // Channel closed
+					}
 
-				// Send message to client: ["message", channel, message]
-				response := protocol.Array{
-					protocol.BulkString("message"),
-					protocol.BulkString(message.Channel),
-					protocol.BulkString(message.Message),
+					// Send message to client: ["message", channel, message]
+					response := protocol.Array{
+						protocol.BulkString("message"),
+						protocol.BulkString(message.Channel),
+						protocol.BulkString(message.Message),
+					}
+					if _, err := c.Write([]byte(protocol.Encode(response))); err != nil {
+						log.Printf("Failed to send message to subscriber: %v", err)
+						return
+					}
+				case <-s.stopCh:
+					return // Server shutting down
 				}
-				if _, err := c.Write([]byte(protocol.Encode(response))); err != nil {
-					log.Printf("Failed to send message to subscriber: %v", err)
-					return
-				}
-			case <-s.stopCh:
-				return // Server shutting down
 			}
-		}
-	}()
+		}()
+	}
 }
 
 // Handle UNSUBSCRIBE command: UNSUBSCRIBE [channel [channel ...]]
 func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
-	// For now, we'll implement a simple version that doesn't track individual connection subscriptions
-	// In a full implementation, you'd need to track which channels each connection is subscribed to
-
-	if len(args) == 1 {
-		// Unsubscribe from all channels - not implemented in this simple version
-		c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	// Get connection state
+	s.mu.RLock()
+	state, exists := s.connStates[c]
+	s.mu.RUnlock()
+	
+	if !exists || state.msgCh == nil {
+		// Connection is not in subscription mode
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR connection is not subscribed"))))
 		return
 	}
-
-	channels := make([]string, 0, len(args)-1)
-	for i := 1; i < len(args); i++ {
-		channels = append(channels, string(args[i].(protocol.BulkString)))
+	
+	var channelsToUnsubscribe []string
+	
+	if len(args) == 1 {
+		// Unsubscribe from all channels
+		log.Printf("DEBUG: Unsubscribing from all channels")
+		
+		state.mu.RLock()
+		channelsToUnsubscribe = make([]string, 0, len(state.channels))
+		for channel := range state.channels {
+			channelsToUnsubscribe = append(channelsToUnsubscribe, channel)
+		}
+		state.mu.RUnlock()
+	} else {
+		// Unsubscribe from specific channels
+		channelsToUnsubscribe = make([]string, 0, len(args)-1)
+		for i := 1; i < len(args); i++ {
+			channel := string(args[i].(protocol.BulkString))
+			
+			// Only include channels we're actually subscribed to
+			state.mu.RLock()
+			if state.channels[channel] {
+				channelsToUnsubscribe = append(channelsToUnsubscribe, channel)
+			}
+			state.mu.RUnlock()
+		}
+		log.Printf("DEBUG: Unsubscribing from channels: %v", channelsToUnsubscribe)
 	}
 
-	log.Printf("DEBUG: Unsubscribing from channels: %v", channels)
+	if len(channelsToUnsubscribe) == 0 {
+		// No channels to unsubscribe from
+		log.Printf("DEBUG: No channels to unsubscribe from")
+		return
+	}
+	
+	// Use the improved Unsubscribe method that returns actually removed channels
+	removedChannels := s.pubsub.Unsubscribe(channelsToUnsubscribe, state.msgCh)
+	
+	log.Printf("DEBUG: Actually unsubscribed from channels: %v", removedChannels)
 
-	// Send unsubscribe confirmations
-	for i, channel := range channels {
+	// Update connection state
+	state.mu.Lock()
+	for _, channel := range removedChannels {
+		delete(state.channels, channel)
+	}
+	remainingSubscriptions := len(state.channels)
+	state.mu.Unlock()
+
+	// Send unsubscribe confirmations for channels that were actually removed
+	currentCount := remainingSubscriptions + len(removedChannels)
+	for _, channel := range removedChannels {
+		currentCount--
 		response := protocol.Array{
 			protocol.BulkString("unsubscribe"),
 			protocol.BulkString(channel),
-			protocol.Integer(len(channels) - i - 1), // remaining subscription count
+			protocol.Integer(currentCount), // remaining subscription count
 		}
 		c.Write([]byte(protocol.Encode(response)))
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	// If we unsubscribed from all channels, close the message channel
+	if remainingSubscriptions == 0 {
+		close(state.msgCh)
+		state.msgCh = nil
+	}
 }

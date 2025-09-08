@@ -1,6 +1,8 @@
 package store
 
-import "sync"
+import (
+	"sync"
+)
 
 type PubSubMessage struct {
 	Channel string
@@ -29,17 +31,34 @@ func (ps *PubSub) Subscribe(channels []string, out chan PubSubMessage) {
 	}
 }
 
-func (ps *PubSub) Unsubscribe(channels []string, out chan PubSubMessage) {
+func (ps *PubSub) Unsubscribe(channels []string, out chan PubSubMessage) []string {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	for _, channel := range channels {
-		if subs, ok := ps.subscribers[channel]; ok {
-			delete(subs, out)
-			if len(subs) == 0 {
-				delete(ps.subscribers, channel)
+
+	var removed []string
+	if len(channels) == 0 {
+		// Unsubscribe from all channels
+		for channel := range ps.subscribers {
+			if _, ok := ps.subscribers[channel][out]; ok {
+				delete(ps.subscribers[channel], out)
+				removed = append(removed, channel)
+				if len(ps.subscribers[channel]) == 0 {
+					delete(ps.subscribers, channel)
+				}
+			}
+		}
+	} else {
+		for _, channel := range channels {
+			if _, ok := ps.subscribers[channel][out]; ok {
+				delete(ps.subscribers[channel], out)
+				removed = append(removed, channel)
+				if len(ps.subscribers[channel]) == 0 {
+					delete(ps.subscribers, channel)
+				}
 			}
 		}
 	}
+	return removed
 }
 
 func (ps *PubSub) Publish(channel, message string) int {
