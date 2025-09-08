@@ -58,6 +58,55 @@ func NewServerWithAOF(addr, aofPath string) (*Server, error) {
 			return nil, fmt.Errorf("failed to create store with AOF for shard %d: %v", i, err)
 		}
 
+		// Load existing data from AOF file
+		if err := st.LoadFromAOF(); err != nil {
+			log.Printf("WARNING: Failed to load AOF for shard %d: %v", i, err)
+			// Continue anyway - empty store is valid
+		}
+
+		// Start cleaner for each store
+		st.StartCleaner(20, 100000*time.Millisecond)
+		shard := store.NewShard(st)
+		nodeID := fmt.Sprintf("shard-%d", i)
+		sharedStore.AddNode(nodeID, shard)
+	}
+
+	s := &Server{
+		addr:       addr,
+		shards:     sharedStore,
+		pubsub:     store.NewPubSub(),
+		conns:      make(map[net.Conn]struct{}),
+		connStates: make(map[net.Conn]*ConnectionState),
+		stopCh:     make(chan struct{}),
+		mu:         sync.RWMutex{},
+		wg:         sync.WaitGroup{},
+		stopOnce:   sync.Once{},
+		debug:      true,
+	}
+
+	return s, nil
+}
+
+// NewServerWithAOFConfig creates a new server with AOF persistence and custom config
+func NewServerWithAOFConfig(addr, aofPath string, fsyncPolicy store.AOFFsyncPolicy, rewriteSize int64) (*Server, error) {
+	sharedStore := store.NewSharedStore(2) // 2 replicas for consistent hashing
+
+	// Create and add 2 shards with AOF enabled
+	numShards := 2
+	for i := 0; i < numShards; i++ {
+		// Create AOF path for each shard
+		shardAOFPath := fmt.Sprintf("%s.shard-%d", aofPath, i)
+		st, err := store.NewStoreWithAOFConfig(shardAOFPath, fsyncPolicy, rewriteSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create store with AOF config for shard %d: %v", i, err)
+		}
+
+		// Load existing data from AOF file
+		if err := st.LoadFromAOF(); err != nil {
+			log.Printf("WARNING: Failed to load AOF for shard %d: %v", i, err)
+			// Continue anyway - empty store is valid
+		}
+
 		// Start cleaner for each store
 		st.StartCleaner(20, 100000*time.Millisecond)
 		shard := store.NewShard(st)

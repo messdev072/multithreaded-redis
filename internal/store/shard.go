@@ -123,14 +123,7 @@ func (s *Shard) handle(req ShardRequest) {
 			}
 			expire = dur
 		}
-		expireStr := ""
-		if expire > 0 {
-			expireStr = fmt.Sprintf(" and expiration %v", expire)
-		}
-		log.Printf("DEBUG: %s - Setting value with length %d bytes%s",
-			req.Key, len(val), expireStr)
 		s.Store.Set(req.Key, val, expire)
-		log.Printf("DEBUG: %s - Successfully set value", req.Key)
 		req.Reply <- "OK"
 	case "GET":
 		val, found := s.Store.Get(req.Key)
@@ -334,25 +327,6 @@ func (s *Shard) handle(req ShardRequest) {
 			return
 		}
 
-		// Log value details based on type
-		switch val.Type {
-		case StringType:
-			log.Printf("DEBUG: %s - Found in source shard with type=STRING, data=%q", req.Key, string(val.Data))
-		case SetType:
-			log.Printf("DEBUG: %s - Found in source shard with type=SET, members=%d", req.Key, len(val.Set))
-		case HashType:
-			log.Printf("DEBUG: %s - Found in source shard with type=HASH, fields=%d", req.Key, len(val.Hash))
-		case CMSType:
-			if val.CMS != nil {
-				log.Printf("DEBUG: %s - Found in source shard with type=CMS, width=%d, depth=%d",
-					req.Key, val.CMS.Width, val.CMS.Depth)
-			} else {
-				log.Printf("DEBUG: %s - Found in source shard with type=CMS but CMS is nil", req.Key)
-			}
-		default:
-			log.Printf("DEBUG: %s - Found in source shard with type=%d", req.Key, val.Type)
-		}
-
 		valueBytes := s.Store.serializeValue(val)
 		if valueBytes == nil {
 			log.Printf("ERROR: %s - Failed to serialize value", req.Key)
@@ -369,9 +343,6 @@ func (s *Shard) handle(req ShardRequest) {
 			TTL:        s.Store.getExpirationTime(req.Key),
 		}
 
-		log.Printf("DEBUG: %s - Dumped value: type=%d, size=%d bytes",
-			req.Key, kd.ValueType, len(kd.ValueBytes))
-
 		if req.Reply != nil {
 			req.Reply <- kd
 		}
@@ -386,9 +357,6 @@ func (s *Shard) handle(req ShardRequest) {
 			}
 			return
 		}
-		log.Printf("DEBUG: %s - Starting restore with type=%d, size=%d bytes",
-			kd.Key, kd.ValueType, len(kd.ValueBytes))
-
 		// restore into s.store preserving TTL
 		if err := s.Store.restoreFromDump(kd); err != nil {
 			log.Printf("ERROR: %s - Failed to restore: %v", kd.Key, err)

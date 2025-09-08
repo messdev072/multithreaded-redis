@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"encoding/gob"
-	"fmt"
 	"log"
 	"time"
 
@@ -26,24 +25,6 @@ func init() {
 func (s *Store) serializeValue(v Value) []byte {
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
-
-	// For logging
-	switch v.Type {
-	case StringType:
-		log.Printf("DEBUG: Serializing string value: type=%d, data=%q", v.Type, string(v.Data))
-	case SetType:
-		log.Printf("DEBUG: Serializing set value: type=%d, members=%d", v.Type, len(v.Set))
-	case HashType:
-		log.Printf("DEBUG: Serializing hash value: type=%d, fields=%d", v.Type, len(v.Hash))
-	case CMSType:
-		if v.CMS != nil {
-			log.Printf("DEBUG: Serializing CMS value: type=%d, width=%d, depth=%d", v.Type, v.CMS.Width, v.CMS.Depth)
-		} else {
-			log.Printf("DEBUG: Serializing CMS value: type=%d, but CMS is nil", v.Type)
-		}
-	default:
-		log.Printf("DEBUG: Serializing value: type=%d", v.Type)
-	}
 
 	// Create a serializable version of the value
 	sv := SerializedValue{
@@ -116,27 +97,6 @@ func (s *Store) restoreFromDump(kd KeyDump) error {
 		v.ZSet = make(map[string]float64)
 	}
 
-	// Log restore operation for all types
-	switch v.Type {
-	case StringType:
-		log.Printf("DEBUG: Restoring string value: type=%d, data=%q", v.Type, string(v.Data))
-		if len(v.Data) == 0 {
-			return fmt.Errorf("empty data for string value")
-		}
-	case SetType:
-		log.Printf("DEBUG: Restoring set value: type=%d, members=%d", v.Type, len(v.Set))
-	case HashType:
-		log.Printf("DEBUG: Restoring hash value: type=%d, fields=%d", v.Type, len(v.Hash))
-	case CMSType:
-		if v.CMS != nil {
-			log.Printf("DEBUG: Restoring CMS value: type=%d, width=%d, depth=%d", v.Type, v.CMS.Width, v.CMS.Depth)
-		} else {
-			log.Printf("DEBUG: Restoring CMS value: type=%d, but CMS is nil", v.Type)
-		}
-	default:
-		log.Printf("DEBUG: Restoring value: type=%d", v.Type)
-	}
-
 	// set expiration & last access
 	if !kd.TTL.IsZero() {
 		v.Expiration = kd.TTL.UnixNano()
@@ -148,10 +108,6 @@ func (s *Store) restoreFromDump(kd KeyDump) error {
 	//set into store with proper TTL handling
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if kd.Key == "key2" {
-		log.Printf("DEBUG: key2 - Restoring with type %d and value %q", v.Type, string(v.Data))
-	}
 
 	// Create deep copies of the maps to avoid any shared references
 	if v.Hash != nil {
@@ -187,16 +143,6 @@ func (s *Store) restoreFromDump(kd KeyDump) error {
 		log.Printf("DEBUG: %s - Stored string value: %q", kd.Key, string(v.Data))
 	}
 
-	// Extra debug logging for key2
-	if kd.Key == "key2" {
-		// Verify it was stored
-		if stored, ok := s.data[kd.Key]; ok {
-			log.Printf("DEBUG: key2 - Verified in store with type %d and value %q",
-				stored.Type, string(stored.Data))
-		} else {
-			log.Printf("ERROR: key2 - Failed to verify in store after setting!")
-		}
-	}
 	return nil
 }
 

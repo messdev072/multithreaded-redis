@@ -5,6 +5,7 @@ import (
 	"flag"
 	"log"
 	"multithreaded-redis/internal/net"
+	"multithreaded-redis/internal/store"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,10 +16,25 @@ import (
 func main() {
 	// Parse command line flags
 	var (
-		addr   = flag.String("addr", ":6380", "Server address to bind to")
-		logDir = flag.String("logdir", "./logs", "Directory to store AOF log files")
+		addr           = flag.String("addr", ":6380", "Server address to bind to")
+		logDir         = flag.String("logdir", "./logs", "Directory to store AOF log files")
+		fsyncPolicy    = flag.String("fsync", "everysec", "AOF fsync policy: never, always, everysec")
+		rewriteSize    = flag.Int64("aof-rewrite-size", 64*1024*1024, "AOF rewrite threshold in bytes (64MB default)")
 	)
 	flag.Parse()
+
+	// Parse fsync policy
+	var aofFsyncPolicy store.AOFFsyncPolicy
+	switch *fsyncPolicy {
+	case "never":
+		aofFsyncPolicy = store.AOFFsyncNever
+	case "always":
+		aofFsyncPolicy = store.AOFFsyncAlways
+	case "everysec":
+		aofFsyncPolicy = store.AOFFsyncEverySec
+	default:
+		log.Fatalf("Invalid fsync policy: %s (must be: never, always, everysec)", *fsyncPolicy)
+	}
 
 	// Enable immediate logging
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -31,8 +47,9 @@ func main() {
 	// AOF is now mandatory - create path in log directory
 	aofPath := filepath.Join(*logDir, "redis.aof")
 	log.Printf("Starting server with AOF enabled: %s", aofPath)
+	log.Printf("AOF fsync policy: %s, rewrite threshold: %d bytes", *fsyncPolicy, *rewriteSize)
 
-	s, err := net.NewServer(*addr, aofPath)
+	s, err := net.NewServerWithAOFConfig(*addr, aofPath, aofFsyncPolicy, *rewriteSize)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
 	}

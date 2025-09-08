@@ -32,7 +32,6 @@ func (ss *SharedStore) BackgroundMigrateTo(ctx context.Context, destNode string,
 				if !processedKeys[k] {
 					targetNode, ok := ss.ring.GetNode(k)
 					if ok {
-						log.Printf("DEBUG: %s currently maps to node %s", k, targetNode)
 						if targetNode == destNode {
 							uniqKeys = append(uniqKeys, k)
 							processedKeys[k] = false // false means not yet processed
@@ -82,7 +81,6 @@ func (ss *SharedStore) BackgroundMigrateTo(ctx context.Context, destNode string,
 					log.Printf("Warning: Could not get target node for key %s", k)
 					continue
 				}
-				log.Printf("DEBUG: %s currently maps to node %s", k, target)
 				if target != destNode {
 					log.Printf("Key %s maps to node %s (not %s), skipping", k, target, destNode)
 					continue
@@ -107,12 +105,8 @@ func (ss *SharedStore) BackgroundMigrateTo(ctx context.Context, destNode string,
 					switch v := resp.(type) {
 					case KeyDump:
 						kd = v
-						log.Printf("DEBUG: %s - Successfully dumped from shard %s with type %d and data %q",
-							k, node, v.ValueType, string(v.ValueBytes))
 					case *KeyDump:
 						kd = *v
-						log.Printf("DEBUG: %s - Successfully dumped from shard %s with type %d and data %q",
-							k, node, v.ValueType, string(v.ValueBytes))
 					default:
 						log.Printf("unexpected dump response type for key %s: %T (value: %v)", k, resp, resp)
 						continue
@@ -128,10 +122,6 @@ func (ss *SharedStore) BackgroundMigrateTo(ctx context.Context, destNode string,
 					log.Printf("destination shard %s not found", destNode)
 					continue
 				}
-				if k == "key2" {
-					log.Printf("DEBUG: Attempting to migrate key2 to node %s with value type %d and %d bytes",
-						destNode, kd.ValueType, len(kd.ValueBytes))
-				}
 				restoreReq := ShardRequest{
 					Command: "MIGRATE_RESTORE",
 					Key:     k,
@@ -144,9 +134,6 @@ func (ss *SharedStore) BackgroundMigrateTo(ctx context.Context, destNode string,
 					log.Printf("restore error for key %s -> %v", k, err)
 					//optionally retry/backoff
 					continue
-				}
-				if k == "key2" {
-					log.Printf("DEBUG: Successfully restored key2 to node %s", destNode)
 				}
 
 				// MIGRATE_DELETE -> source (must be sent to srcShard, not destShard)
@@ -194,8 +181,6 @@ func (ss *SharedStore) MigrateKeysBatch(srcShard, destShard *Shard, keys []strin
 		return 0
 	}
 
-	log.Printf("DEBUG: Starting batch migration of %d keys from %s to %s", len(keys), srcNodeID, destNodeID)
-
 	// Collect all key-value pairs and TTLs in batch
 	type keyData struct {
 		key    string
@@ -236,7 +221,6 @@ func (ss *SharedStore) MigrateKeysBatch(srcShard, destShard *Shard, keys []strin
 		destShard.Store.Set(item.key, item.value, item.expire)
 		successCount++
 	}
-	log.Printf("DEBUG: Set %d keys in destination shard %s", successCount, destNodeID)
 
 	// Delete all keys from source shard in batch
 	deletedCount := 0

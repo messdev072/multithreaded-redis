@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +73,21 @@ func NewStoreWithAOF(aofPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
+	return &Store{
+		data: make(map[string]Value),
+		ttl:  make(map[string]time.Time),
+		aof:  aof,
+	}, nil
+}
+
+// NewStoreWithAOFConfig creates a new Store with AOF persistence and custom config
+func NewStoreWithAOFConfig(aofPath string, fsyncPolicy AOFFsyncPolicy, rewriteSize int64) (*Store, error) {
+	aof, err := NewAOFWithConfig(aofPath, fsyncPolicy, rewriteSize)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Store{
 		data: make(map[string]Value),
 		ttl:  make(map[string]time.Time),
@@ -111,7 +126,7 @@ func (s *Store) Set(key string, val []byte, expire time.Duration) {
 	} else {
 		delete(s.ttl, key)
 	}
-	
+
 	// Log to AOF
 	s.logToAOF("SET", key, string(val))
 }
@@ -177,10 +192,10 @@ func (s *Store) Delete(key string) bool {
 	if exists {
 		delete(s.data, key)
 		delete(s.ttl, key)
-		
+
 		// Log to AOF
 		s.logToAOF("DEL", key)
-		
+
 		return true
 	}
 
@@ -638,7 +653,7 @@ func (s *Store) HSet(key, field, value string) int {
 	}
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
-	
+
 	// Log to AOF
 	s.logToAOF("HSET", key, field, value)
 	return 1
@@ -1216,4 +1231,131 @@ func (s *Store) Close() error {
 		return s.aof.Close()
 	}
 	return nil
+}
+
+// LoadFromAOF recovers the store state from AOF file
+func (s *Store) LoadFromAOF() error {
+	if s.aof == nil {
+		return nil // No AOF to load from
+	}
+
+	commands, err := s.aof.LoadCommands()
+	if err != nil {
+		return err
+	}
+
+	log.Printf("AOF: Loading %d commands from AOF", len(commands))
+
+	for i, cmd := range commands {
+		if len(cmd) == 0 {
+			continue
+		}
+
+		// Replay the command
+		err := s.replayCommand(cmd)
+		if err != nil {
+			log.Printf("AOF: Error replaying command %d (%v): %v", i, cmd, err)
+			// Continue with other commands
+		}
+	}
+
+	log.Printf("AOF: Successfully loaded %d commands", len(commands))
+	return nil
+}
+
+// replayCommand replays a single command to restore state
+func (s *Store) replayCommand(cmd []string) error {
+	if len(cmd) == 0 {
+		return fmt.Errorf("empty command")
+	}
+
+	command := strings.ToUpper(cmd[0])
+
+	switch command {
+	case "SET":
+		if len(cmd) != 3 {
+			return fmt.Errorf("SET command requires 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay SET without logging to AOF again
+		s.setWithoutAOF(cmd[1], []byte(cmd[2]), 0)
+
+	case "HSET":
+		if len(cmd) != 4 {
+			return fmt.Errorf("HSET command requires 3 arguments, got %d", len(cmd)-1)
+		}
+		// Replay HSET without logging to AOF again
+		s.hsetWithoutAOF(cmd[1], cmd[2], cmd[3])
+
+	case "DEL":
+		if len(cmd) < 2 {
+			return fmt.Errorf("DEL command requires at least 1 argument, got %d", len(cmd)-1)
+		}
+		// Replay DEL without logging to AOF again
+		s.deleteWithoutAOF(cmd[1])
+
+	default:
+		log.Printf("AOF: Unknown command for replay: %s", command)
+		// Don't return error for unknown commands, just skip them
+	}
+
+	return nil
+}
+
+// setWithoutAOF sets a value without logging to AOF (used during recovery)
+func (s *Store) setWithoutAOF(key string, val []byte, expire time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.expired(key)
+	expiration := int64(0)
+
+	s.data[key] = Value{
+		Type:       StringType,
+		Data:       val,
+		Expiration: expiration,
+		LastAccess: time.Now().UnixNano(),
+	}
+	if expire > 0 {
+		if _, exists := s.ttl[key]; !exists {
+			s.ttlKeys = append(s.ttlKeys, key)
+		}
+		s.ttl[key] = time.Now().Add(expire)
+	} else {
+		delete(s.ttl, key)
+	}
+	// No AOF logging during recovery
+}
+
+// hsetWithoutAOF sets a hash field without logging to AOF (used during recovery)
+func (s *Store) hsetWithoutAOF(key, field, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+	}
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: HashType, Hash: make(map[string]string)}
+		s.data[key] = val
+	}
+	if val.Type != HashType {
+		return
+	}
+
+	val.Hash[field] = value
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// deleteWithoutAOF deletes a key without logging to AOF (used during recovery)
+func (s *Store) deleteWithoutAOF(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.data, key)
+	delete(s.ttl, key)
+	// No AOF logging during recovery
 }
