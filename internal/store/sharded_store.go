@@ -38,7 +38,6 @@ func (ss *SharedStore) AddNode(nodeID string, sh *Shard) error {
 	sh.parent = ss
 	ss.nodeShards[nodeID] = sh
 	ss.ring.AddNode(nodeID)
-	log.Printf("DEBUG: %s - Added node to ring with %d replicas", nodeID, ss.ring.replicas)
 
 	// Start the shard worker before waiting for ready
 	go sh.Run()
@@ -53,7 +52,6 @@ func (ss *SharedStore) AddNode(nodeID string, sh *Shard) error {
 
 	select {
 	case <-ready:
-		log.Printf("DEBUG: %s - Node worker is ready", nodeID)
 		return nil
 	case <-time.After(5 * time.Second):
 		// Clean up if shard doesn't become ready
@@ -119,15 +117,12 @@ func (ss *SharedStore) getShardForKey(key string, command string) (*Shard, bool)
 				nodeID = nodes[hash%uint32(len(nodes))]
 				sh, exists := ss.nodeShards[nodeID]
 				if exists {
-					log.Printf("DEBUG: %s - Hash ring assigned to node %s for SET-like operation", key, nodeID)
 					return sh, true
 				}
 			}
 		}
 		return nil, false
 	}
-
-	log.Printf("DEBUG: %s - Hash ring maps to node %s", key, nodeID)
 
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
@@ -173,18 +168,14 @@ func (ss *SharedStore) Execute(cmd string, key string, args ...string) interface
 		Args:    args,
 		Reply:   make(chan interface{}, 1),
 	}
-	log.Printf("DEBUG: %s - Executing %s command", key, cmd)
 
 	shard, ok := ss.getShardForKey(key, cmd)
 	if !ok {
-		log.Printf("DEBUG: %s - No shard available for command %s", key, cmd)
 		return fmt.Errorf("no shard available for key %s", key)
 	}
 
-	log.Printf("DEBUG: %s - Sending %s command to shard %s", key, cmd, shard.nodeID)
 	shard.inbox <- req
 	resp := <-req.Reply
-	log.Printf("DEBUG: %s - Got response type %T from shard %s", key, resp, shard.nodeID)
 	return resp
 }
 
@@ -202,12 +193,10 @@ func (ss *SharedStore) Set(key string, val []byte, expire time.Duration) error {
 func (ss *SharedStore) Get(key string) ([]byte, bool) {
 	resp := ss.Execute("GET", key)
 	if resp == nil {
-		log.Printf("DEBUG: %s - No value found", key)
 		return nil, false
 	}
 
 	if byteVal, ok := resp.([]byte); ok {
-		log.Printf("DEBUG: %s - Found value: %q", key, string(byteVal))
 		return byteVal, true
 	}
 

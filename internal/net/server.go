@@ -130,6 +130,69 @@ func NewServerWithAOFConfig(addr, aofPath string, fsyncPolicy store.AOFFsyncPoli
 	return s, nil
 }
 
+// NewServerWithAOFAndRDB creates a new server with both AOF and RDB persistence
+func NewServerWithAOFAndRDB(addr, aofPath, rdbPath string, fsyncPolicy store.AOFFsyncPolicy, rewriteSize int64, saveInterval time.Duration) (*Server, error) {
+	sharedStore := store.NewSharedStore(2) // 2 replicas for consistent hashing
+
+	// Create and add 2 shards with both AOF and RDB enabled
+	numShards := 2
+	for i := 0; i < numShards; i++ {
+		// Create AOF and RDB paths for each shard
+		shardAOFPath := fmt.Sprintf("%s.shard-%d", aofPath, i)
+		shardRDBPath := fmt.Sprintf("%s.shard-%d", rdbPath, i)
+
+		st, err := store.NewStoreWithAOFAndRDB(shardAOFPath, shardRDBPath, fsyncPolicy, rewriteSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create store with AOF and RDB for shard %d: %v", i, err)
+		}
+
+		// Load existing data from both RDB and AOF
+		if err := st.LoadFromPersistence(); err != nil {
+			log.Printf("WARNING: Failed to load persistence for shard %d: %v", i, err)
+			// Continue anyway - empty store is valid
+		}
+
+		// Start cleaner for each store
+		st.StartCleaner(20, 100000*time.Millisecond)
+
+		// Start periodic RDB saves if interval > 0
+		if saveInterval > 0 {
+			go func(store *store.Store, interval time.Duration, shardID int) {
+				ticker := time.NewTicker(interval)
+				defer ticker.Stop()
+
+				for range ticker.C {
+					log.Printf("RDB: Starting periodic save for shard %d", shardID)
+					if err := store.SaveRDBSnapshot(); err != nil {
+						log.Printf("RDB: Failed to save snapshot for shard %d: %v", shardID, err)
+					} else {
+						log.Printf("RDB: Successfully saved snapshot for shard %d", shardID)
+					}
+				}
+			}(st, saveInterval, i)
+		}
+
+		shard := store.NewShard(st)
+		nodeID := fmt.Sprintf("shard-%d", i)
+		sharedStore.AddNode(nodeID, shard)
+	}
+
+	s := &Server{
+		addr:       addr,
+		shards:     sharedStore,
+		pubsub:     store.NewPubSub(),
+		conns:      make(map[net.Conn]struct{}),
+		connStates: make(map[net.Conn]*ConnectionState),
+		stopCh:     make(chan struct{}),
+		mu:         sync.RWMutex{},
+		wg:         sync.WaitGroup{},
+		stopOnce:   sync.Once{},
+		debug:      true,
+	}
+
+	return s, nil
+}
+
 func (s *Server) Start() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {

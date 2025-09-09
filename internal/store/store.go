@@ -43,6 +43,7 @@ type Store struct {
 	ttl     map[string]time.Time
 	ttlKeys []string // for random sampling
 	aof     *AOF     // Append Only File for persistence
+	rdb     *RDB     // Redis Database snapshots
 }
 
 func (s *Store) expired(key string) bool {
@@ -92,6 +93,26 @@ func NewStoreWithAOFConfig(aofPath string, fsyncPolicy AOFFsyncPolicy, rewriteSi
 		data: make(map[string]Value),
 		ttl:  make(map[string]time.Time),
 		aof:  aof,
+	}, nil
+}
+
+// NewStoreWithAOFAndRDB creates a new Store with both AOF and RDB persistence
+func NewStoreWithAOFAndRDB(aofPath, rdbPath string, fsyncPolicy AOFFsyncPolicy, rewriteSize int64) (*Store, error) {
+	aof, err := NewAOFWithConfig(aofPath, fsyncPolicy, rewriteSize)
+	if err != nil {
+		return nil, err
+	}
+
+	rdb, err := NewRDB(rdbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Store{
+		data: make(map[string]Value),
+		ttl:  make(map[string]time.Time),
+		aof:  aof,
+		rdb:  rdb,
 	}, nil
 }
 
@@ -1358,4 +1379,54 @@ func (s *Store) deleteWithoutAOF(key string) {
 	delete(s.data, key)
 	delete(s.ttl, key)
 	// No AOF logging during recovery
+}
+
+// SaveRDBSnapshot creates an RDB snapshot of the store
+func (s *Store) SaveRDBSnapshot() error {
+	if s.rdb == nil {
+		return fmt.Errorf("RDB not enabled for this store")
+	}
+	return s.rdb.Save(s)
+}
+
+// LoadFromRDB loads data from RDB snapshot
+func (s *Store) LoadFromRDB() error {
+	if s.rdb == nil {
+		return nil // No RDB to load from
+	}
+	return s.rdb.Load(s)
+}
+
+// LoadFromPersistence loads data from both RDB and AOF
+// RDB is loaded first for the base state, then AOF for recent changes
+func (s *Store) LoadFromPersistence() error {
+	// First load from RDB snapshot for base state
+	if err := s.LoadFromRDB(); err != nil {
+		log.Printf("WARNING: Failed to load RDB: %v", err)
+		// Continue anyway - we might still have AOF
+	}
+
+	// Then replay AOF for recent changes
+	if err := s.LoadFromAOF(); err != nil {
+		log.Printf("WARNING: Failed to load AOF: %v", err)
+		// Continue anyway - we might have loaded RDB successfully
+	}
+
+	return nil
+}
+
+// GetRDBStats returns RDB statistics
+func (s *Store) GetRDBStats() (RDBStats, error) {
+	if s.rdb == nil {
+		return RDBStats{}, fmt.Errorf("RDB not enabled")
+	}
+	return s.rdb.GetStats(), nil
+}
+
+// IsRDBSaveInProgress returns whether an RDB save is currently running
+func (s *Store) IsRDBSaveInProgress() bool {
+	if s.rdb == nil {
+		return false
+	}
+	return s.rdb.IsSaveInProgress()
 }

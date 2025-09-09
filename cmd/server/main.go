@@ -16,10 +16,13 @@ import (
 func main() {
 	// Parse command line flags
 	var (
-		addr           = flag.String("addr", ":6380", "Server address to bind to")
-		logDir         = flag.String("logdir", "./logs", "Directory to store AOF log files")
-		fsyncPolicy    = flag.String("fsync", "everysec", "AOF fsync policy: never, always, everysec")
-		rewriteSize    = flag.Int64("aof-rewrite-size", 64*1024*1024, "AOF rewrite threshold in bytes (64MB default)")
+		addr         = flag.String("addr", ":6380", "Server address to bind to")
+		logDir       = flag.String("logdir", "./logs", "Directory to store AOF log files")
+		rdbDir       = flag.String("rdbdir", "./snapshots", "Directory to store RDB snapshot files")
+		fsyncPolicy  = flag.String("fsync", "everysec", "AOF fsync policy: never, always, everysec")
+		rewriteSize  = flag.Int64("aof-rewrite-size", 64*1024*1024, "AOF rewrite threshold in bytes (64MB default)")
+		saveInterval = flag.Int("save-interval", 900, "RDB save interval in seconds (15 minutes default, 0 to disable)")
+		enableRDB    = flag.Bool("enable-rdb", true, "Enable RDB snapshots")
 	)
 	flag.Parse()
 
@@ -44,12 +47,34 @@ func main() {
 		log.Fatalf("Failed to create log directory %s: %v", *logDir, err)
 	}
 
+	// Create RDB directory if RDB is enabled
+	var rdbPath string
+	if *enableRDB {
+		if err := os.MkdirAll(*rdbDir, 0755); err != nil {
+			log.Fatalf("Failed to create RDB directory %s: %v", *rdbDir, err)
+		}
+		rdbPath = filepath.Join(*rdbDir, "dump.rdb")
+	}
+
 	// AOF is now mandatory - create path in log directory
 	aofPath := filepath.Join(*logDir, "redis.aof")
 	log.Printf("Starting server with AOF enabled: %s", aofPath)
 	log.Printf("AOF fsync policy: %s, rewrite threshold: %d bytes", *fsyncPolicy, *rewriteSize)
 
-	s, err := net.NewServerWithAOFConfig(*addr, aofPath, aofFsyncPolicy, *rewriteSize)
+	if *enableRDB {
+		log.Printf("RDB snapshots enabled: %s, save interval: %d seconds", rdbPath, *saveInterval)
+	} else {
+		log.Printf("RDB snapshots disabled")
+	}
+
+	var s *net.Server
+	var err error
+
+	if *enableRDB {
+		s, err = net.NewServerWithAOFAndRDB(*addr, aofPath, rdbPath, aofFsyncPolicy, *rewriteSize, time.Duration(*saveInterval)*time.Second)
+	} else {
+		s, err = net.NewServerWithAOFConfig(*addr, aofPath, aofFsyncPolicy, *rewriteSize)
+	}
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
 	}
