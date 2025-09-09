@@ -14,15 +14,18 @@ import (
 )
 
 type ConnectionState struct {
-	msgCh    chan store.PubSubMessage
-	channels map[string]bool // tracks which channels this connection is subscribed to
-	mu       sync.RWMutex
+	msgCh       chan store.PubSubMessage
+	channels    map[string]bool // tracks which channels this connection is subscribed to
+	mu          sync.RWMutex
+	user        *store.ACLUser  // authenticated user for this connection
+	authenticated bool           // whether connection is authenticated
 }
 
 type Server struct {
 	addr   string
 	shards *store.SharedStore
 	pubsub *store.PubSub
+	acl    *store.ACLManager  // ACL authentication and authorization
 	ln     net.Listener
 
 	// connection management
@@ -75,6 +78,7 @@ func NewServerWithAOF(addr, aofPath string) (*Server, error) {
 		addr:       addr,
 		shards:     sharedStore,
 		pubsub:     store.NewPubSub(),
+		acl:        store.NewACLManager(),
 		conns:      make(map[net.Conn]struct{}),
 		connStates: make(map[net.Conn]*ConnectionState),
 		stopCh:     make(chan struct{}),
@@ -118,6 +122,7 @@ func NewServerWithAOFConfig(addr, aofPath string, fsyncPolicy store.AOFFsyncPoli
 		addr:       addr,
 		shards:     sharedStore,
 		pubsub:     store.NewPubSub(),
+		acl:        store.NewACLManager(),
 		conns:      make(map[net.Conn]struct{}),
 		connStates: make(map[net.Conn]*ConnectionState),
 		stopCh:     make(chan struct{}),
@@ -181,6 +186,7 @@ func NewServerWithAOFAndRDB(addr, aofPath, rdbPath string, fsyncPolicy store.AOF
 		addr:       addr,
 		shards:     sharedStore,
 		pubsub:     store.NewPubSub(),
+		acl:        store.NewACLManager(),
 		conns:      make(map[net.Conn]struct{}),
 		connStates: make(map[net.Conn]*ConnectionState),
 		stopCh:     make(chan struct{}),
@@ -191,6 +197,83 @@ func NewServerWithAOFAndRDB(addr, aofPath, rdbPath string, fsyncPolicy store.AOF
 	}
 
 	return s, nil
+}
+
+// getDefaultUser returns the default user from ACL manager
+func (s *Server) getDefaultUser() *store.ACLUser {
+	user, _ := s.acl.GetUser("default")
+	return user
+}
+
+// checkAuth checks if connection is authenticated and has permission for command
+func (s *Server) checkAuth(c net.Conn, command string, keys ...string) error {
+	s.mu.RLock()
+	state, exists := s.connStates[c]
+	s.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("connection state not found")
+	}
+
+	state.mu.RLock()
+	user := state.user
+	authenticated := state.authenticated
+	state.mu.RUnlock()
+
+	// Check if connection is authenticated
+	if !authenticated {
+		return fmt.Errorf("NOAUTH Authentication required")
+	}
+
+	// Check command permission
+	if err := s.acl.CheckCommandPermission(user, command); err != nil {
+		return err
+	}
+
+	// Check key permissions for commands that access keys
+	for _, key := range keys {
+		if err := s.acl.CheckKeyPermission(user, key); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// authenticateConnection sets the authenticated user for a connection
+func (s *Server) authenticateConnection(c net.Conn, user *store.ACLUser) {
+	s.mu.RLock()
+	state, exists := s.connStates[c]
+	s.mu.RUnlock()
+
+	if exists {
+		state.mu.Lock()
+		state.user = user
+		state.authenticated = true
+		state.mu.Unlock()
+	}
+}
+
+// ConfigureACL configures the ACL system with the provided settings
+func (s *Server) ConfigureACL(requireAuth bool, defaultPassword string) error {
+	if requireAuth {
+		if err := s.acl.RequireAuthentication(); err != nil {
+			return fmt.Errorf("failed to require authentication: %v", err)
+		}
+	}
+	
+	if defaultPassword != "" {
+		if err := s.acl.SetDefaultUserPassword(defaultPassword); err != nil {
+			return fmt.Errorf("failed to set default password: %v", err)
+		}
+	}
+	
+	return nil
+}
+
+// GetACLManager returns the ACL manager
+func (s *Server) GetACLManager() *store.ACLManager {
+	return s.acl
 }
 
 func (s *Server) Start() error {
@@ -221,7 +304,9 @@ func (s *Server) acceptLoop() {
 		s.mu.Lock()
 		s.conns[conn] = struct{}{}
 		s.connStates[conn] = &ConnectionState{
-			channels: make(map[string]bool),
+			channels:      make(map[string]bool),
+			user:          s.getDefaultUser(),
+			authenticated: true, // Default user is automatically authenticated (nopass)
 		}
 		s.mu.Unlock()
 
@@ -327,6 +412,10 @@ func (s *Server) handleConn(c net.Conn) {
 			log.Printf("Received command: %s with args: %v", cmdStr, v)
 
 			switch cmdStr {
+			case "AUTH":
+				s.handleAUTH(c, v)
+			case "ACL":
+				s.handleACL(c, v)
 			case "PING":
 				log.Printf("Handling PING command")
 				c.Write([]byte(protocol.Encode(protocol.SimpleString("PONG"))))

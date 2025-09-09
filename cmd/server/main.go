@@ -23,6 +23,8 @@ func main() {
 		rewriteSize  = flag.Int64("aof-rewrite-size", 64*1024*1024, "AOF rewrite threshold in bytes (64MB default)")
 		saveInterval = flag.Int("save-interval", 900, "RDB save interval in seconds (15 minutes default, 0 to disable)")
 		enableRDB    = flag.Bool("enable-rdb", true, "Enable RDB snapshots")
+		requireAuth  = flag.Bool("require-auth", false, "Require authentication for all connections")
+		defaultPass  = flag.String("default-password", "", "Set password for default user (empty = no password required)")
 	)
 	flag.Parse()
 
@@ -78,6 +80,54 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
 	}
+
+	// Configure ACL settings
+	if *requireAuth || *defaultPass != "" {
+		log.Printf("Configuring ACL system...")
+		if err := s.ConfigureACL(*requireAuth, *defaultPass); err != nil {
+			log.Fatalf("Failed to configure ACL: %v", err)
+		}
+		
+		if *requireAuth {
+			log.Printf("Authentication required for all connections")
+			
+			// Create test users for demonstration when auth is required
+			if *defaultPass == "" {
+				log.Printf("Creating test users: readonly and writeonly")
+				
+				// Create readonly user
+				if err := s.GetACLManager().CreateUser("readonly", "readpass"); err != nil {
+					log.Printf("Failed to create readonly user: %v", err)
+				} else {
+					// Configure readonly permissions
+					if err := s.GetACLManager().SetUserCategories("readonly", []string{"+@read", "-@write", "-@admin"}); err != nil {
+						log.Printf("Failed to set readonly categories: %v", err)
+					}
+					if err := s.GetACLManager().SetUserKeys("readonly", []string{"*"}); err != nil {
+						log.Printf("Failed to set readonly keys: %v", err)
+					}
+				}
+				
+				// Create writeonly user
+				if err := s.GetACLManager().CreateUser("writeonly", "writepass"); err != nil {
+					log.Printf("Failed to create writeonly user: %v", err)
+				} else {
+					// Configure writeonly permissions
+					if err := s.GetACLManager().SetUserCategories("writeonly", []string{"+@write", "-@read", "-@admin"}); err != nil {
+						log.Printf("Failed to set writeonly categories: %v", err)
+					}
+					if err := s.GetACLManager().SetUserKeys("writeonly", []string{"write:*"}); err != nil {
+						log.Printf("Failed to set writeonly keys: %v", err)
+					}
+				}
+			}
+		}
+		if *defaultPass != "" {
+			log.Printf("Password set for default user")
+		}
+	}
+	
+	log.Printf("ACL system enabled with default user")
 
 	if err := s.Start(); err != nil {
 		log.Fatalf("Error starting server: %v", err)
