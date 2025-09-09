@@ -55,9 +55,9 @@ func (s *Server) handleACL(c net.Conn, args protocol.Array) {
 
 	switch subCmd {
 	case "LIST":
-		s.handleACLList(c, args)
+		s.handleACLList(c)
 	case "USERS":
-		s.handleACLUsers(c, args)
+		s.handleACLUsers(c)
 	case "GETUSER":
 		s.handleACLGetUser(c, args)
 	case "SETUSER":
@@ -67,14 +67,14 @@ func (s *Server) handleACL(c net.Conn, args protocol.Array) {
 	case "CAT":
 		s.handleACLCat(c, args)
 	case "WHOAMI":
-		s.handleACLWhoAmI(c, args)
+		s.handleACLWhoAmI(c)
 	default:
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR Unknown ACL subcommand: %s", subCmd)))))
 	}
 }
 
 // ACL LIST - List all users with their configurations
-func (s *Server) handleACLList(c net.Conn, args protocol.Array) {
+func (s *Server) handleACLList(c net.Conn) {
 	users := s.acl.ListUsers()
 	result := make([]protocol.RESPType, 0, len(users))
 
@@ -131,7 +131,7 @@ func (s *Server) handleACLList(c net.Conn, args protocol.Array) {
 }
 
 // ACL USERS - List all usernames
-func (s *Server) handleACLUsers(c net.Conn, args protocol.Array) {
+func (s *Server) handleACLUsers(c net.Conn) {
 	users := s.acl.ListUsers()
 	result := make([]protocol.RESPType, 0, len(users))
 
@@ -286,8 +286,7 @@ func (s *Server) handleACLCat(c net.Conn, args protocol.Array) {
 		c.Write([]byte(protocol.Encode(protocol.Array(categories))))
 	} else if len(args) == 3 {
 		// List commands in category
-		category := string(args[2].(protocol.BulkString))
-		commands, exists := store.CommandCategories[category]
+		commands, exists := store.CommandCategories[string(args[2].(protocol.BulkString))]
 		if !exists {
 			c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown category"))))
 			return
@@ -304,7 +303,7 @@ func (s *Server) handleACLCat(c net.Conn, args protocol.Array) {
 }
 
 // ACL WHOAMI - Get current user
-func (s *Server) handleACLWhoAmI(c net.Conn, args protocol.Array) {
+func (s *Server) handleACLWhoAmI(c net.Conn) {
 	s.mu.RLock()
 	state, exists := s.connStates[c]
 	s.mu.RUnlock()
