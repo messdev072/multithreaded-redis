@@ -128,6 +128,208 @@ The system uses Redis-compatible command categories:
 - `ADDNODE`, `REMOVENODE`, `NODES` (cluster management)
 - `FLUSHDB`, `FLUSHALL`
 
+## Permission Patterns Guide
+
+### Command Pattern Syntax
+
+ACL permissions use a specific syntax to grant or deny command access:
+
+#### Command Categories
+```bash
++@read      # Allow all read commands
+-@write     # Deny all write commands
++@admin     # Allow all admin commands
+-@all       # Deny all commands (start with clean slate)
++@all       # Allow all commands
+```
+
+#### Individual Commands
+```bash
++GET        # Allow GET command
+-DEL        # Deny DEL command
++SET        # Allow SET command
+-FLUSHDB    # Deny FLUSHDB command
+```
+
+#### Combined Patterns
+```bash
+# Start with no permissions, then add specific ones
+-@all +@read +SET +DEL
+
+# Allow all commands except dangerous ones
++@all -FLUSHDB -FLUSHALL -DEL
+
+# Read-only with specific write permissions
++@read +SET +EXPIRE
+```
+
+### Key Pattern Syntax
+
+Key patterns control which keys a user can access:
+
+#### Basic Patterns
+```bash
+~*              # Access to all keys
+~user:*         # Access to keys starting with "user:"
+~cache:*        # Access to keys starting with "cache:"
+~session:123    # Access only to specific key "session:123"
+```
+
+#### Wildcard Patterns
+```bash
+~user:*:profile     # Match user:123:profile, user:456:profile
+~data:*:temp        # Match data:prod:temp, data:test:temp
+~log:????-??-??     # Match log:2024-01-15, log:2024-12-31
+```
+
+#### Multiple Key Patterns
+```bash
+# Allow access to multiple key patterns
+~user:* ~session:* ~cache:*
+
+# Mix specific keys and patterns
+~global_config ~user:* ~temp:*
+```
+
+#### Pattern Restrictions
+```bash
+# No key access (useful with +@admin for management-only users)
+# (omit ~ patterns entirely)
+
+# Limited to specific namespace
+~myapp:*
+
+# Multiple restricted namespaces
+~app1:* ~app2:* ~shared:*
+```
+
+### Advanced Permission Examples
+
+#### 1. Application-Specific User
+```bash
+# Web application user with restricted access
+ACL SETUSER webapp >webpass123 -@all +@read +@write ~webapp:* ~session:*
+```
+**Explanation**: Deny all commands, then allow read/write operations only on keys matching `webapp:*` and `session:*`
+
+#### 2. Database Migration User
+```bash
+# User for data migration with broad read access but limited write
+ACL SETUSER migrator >migrate456 +@read +SET +DEL ~data:* ~backup:*
+```
+**Explanation**: Allow all read operations plus SET/DEL, but only on `data:*` and `backup:*` keys
+
+#### 3. Monitoring User
+```bash
+# Read-only monitoring with access to metrics and logs
+ACL SETUSER monitor >monitor789 +@read +INFO +PING ~metrics:* ~logs:* ~status:*
+```
+**Explanation**: Read operations plus server info commands, restricted to monitoring-related keys
+
+#### 4. Cache Manager User
+```bash
+# User dedicated to cache management
+ACL SETUSER cache_mgr >cache123 +@read +@write +EXPIRE +TTL -DEL ~cache:*
+```
+**Explanation**: Read/write access with expiration management but no delete permission, only for cache keys
+
+#### 5. Admin User with Restrictions
+```bash
+# Admin user that cannot delete production data
+ACL SETUSER safe_admin >admin789 +@all -DEL -FLUSHDB -FLUSHALL ~*
+```
+**Explanation**: Full admin access except for destructive operations
+
+#### 6. Backup User
+```bash
+# Backup system with read-only access
+ACL SETUSER backup >backup321 +@read +SCAN +KEYS ~*
+```
+**Explanation**: Read all data and enumerate keys for backup purposes
+
+#### 7. Analytics User
+```bash
+# Analytics system with specific patterns
+ACL SETUSER analytics >analytics456 +@read +SCAN ~analytics:* ~metrics:* ~events:*
+```
+**Explanation**: Read access limited to analytics, metrics, and events data
+
+#### 8. Temporary Development User
+```bash
+# Developer with limited access to development namespace
+ACL SETUSER dev_temp >devpass +@read +@write +FLUSHDB ~dev:* ~test:*
+```
+**Explanation**: Full read/write in development and test namespaces, can clear dev databases
+
+### Permission Validation Patterns
+
+#### Testing User Permissions
+```bash
+# Test read permission on specific key
+GET user:123:profile
+
+# Test write permission  
+SET cache:temp:data "value"
+
+# Test pattern matching
+SET user:456:settings "config"  # Should work with ~user:*
+SET admin:secret "data"         # Should fail if user doesn't have ~admin:*
+```
+
+#### Common Permission Combinations
+
+| Use Case | Command Pattern | Key Pattern | Example |
+|----------|----------------|-------------|---------|
+| **Read-Only App** | `+@read` | `~app:*` | Web frontend reading data |
+| **Write-Only Logger** | `+SET +SADD +LPUSH` | `~logs:*` | Log aggregation service |
+| **Session Manager** | `+@read +@write +EXPIRE` | `~session:*` | Session storage service |
+| **Cache Service** | `+@read +@write +DEL +EXPIRE` | `~cache:*` | Redis cache layer |
+| **Admin Tools** | `+@all -FLUSHDB -FLUSHALL` | `~*` | Safe admin access |
+| **Backup System** | `+@read +SCAN +KEYS` | `~*` | Data backup/replication |
+
+### Permission Troubleshooting
+
+#### Common Permission Errors
+```bash
+# Error: "ERR command not allowed"
+# Cause: Command not in allowed categories
+# Solution: Add command or category: +@read, +GET, etc.
+
+# Error: "ERR key access denied" 
+# Cause: Key doesn't match allowed patterns
+# Solution: Add key pattern: ~mykey:*, ~pattern:*
+
+# Error: "ERR user is disabled"
+# Cause: User account disabled
+# Solution: ACL SETUSER username on
+```
+
+#### Debugging Permission Issues
+```bash
+# Check user's current permissions
+ACL LIST
+
+# Test specific command/key combination
+AUTH username password
+GET test:key              # Test if this specific operation works
+SET restricted:key value  # Test write permissions
+```
+
+#### Best Practice Patterns
+```bash
+# 1. Principle of Least Privilege
+ACL SETUSER app >pass -@all +@read +SET +DEL ~app:*
+
+# 2. Environment Separation  
+ACL SETUSER prod_app >pass +@read +@write ~prod:*
+ACL SETUSER dev_app >pass +@read +@write +FLUSHDB ~dev:*
+
+# 3. Role-Based Access
+ACL SETUSER reader >pass +@read ~*
+ACL SETUSER writer >pass +@read +@write ~data:*
+ACL SETUSER admin >pass +@all ~*
+```
+
 ## User Management Examples
 
 ### Creating a Database Administrator

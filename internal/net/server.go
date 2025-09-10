@@ -19,6 +19,11 @@ type ConnectionState struct {
 	mu            sync.RWMutex
 	user          *store.ACLUser // authenticated user for this connection
 	authenticated bool           // whether connection is authenticated
+
+	// Transaction support
+	inTransaction bool             // whether this connection is in MULTI mode
+	txQueue       []protocol.Array // queued commands during transaction
+	txMu          sync.Mutex       // protects transaction state
 }
 
 type Server struct {
@@ -411,6 +416,18 @@ func (s *Server) handleConn(c net.Conn) {
 			cmdStr := string(cmd)
 			log.Printf("Received command: %s with args: %v", cmdStr, v)
 
+			// Check if we're in transaction mode and should queue this command
+			inTx := s.isInTransaction(c)
+			log.Printf("Command %s: inTransaction = %v", cmdStr, inTx)
+			if inTx {
+				// Transaction control commands are handled normally
+				if cmdStr != "MULTI" && cmdStr != "EXEC" && cmdStr != "DISCARD" {
+					log.Printf("Queueing command %s in transaction", cmdStr)
+					s.queueTransactionCommand(c, v)
+					continue
+				}
+			}
+
 			switch cmdStr {
 			case "AUTH":
 				s.handleAUTH(c, v)
@@ -498,6 +515,12 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleUnsubscribe(c, v)
 			case "PUBLISH":
 				s.handlePublish(c, v)
+			case "MULTI":
+				s.handleMulti(c, v)
+			case "EXEC":
+				s.handleExec(c, v)
+			case "DISCARD":
+				s.handleDiscard(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
