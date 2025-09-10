@@ -14,10 +14,10 @@ import (
 )
 
 type ConnectionState struct {
-	msgCh       chan store.PubSubMessage
-	channels    map[string]bool // tracks which channels this connection is subscribed to
-	mu          sync.RWMutex
-	user        *store.ACLUser  // authenticated user for this connection
+	msgCh         chan store.PubSubMessage
+	channels      map[string]bool // tracks which channels this connection is subscribed to
+	mu            sync.RWMutex
+	user          *store.ACLUser // authenticated user for this connection
 	authenticated bool           // whether connection is authenticated
 }
 
@@ -25,7 +25,7 @@ type Server struct {
 	addr   string
 	shards *store.SharedStore
 	pubsub *store.PubSub
-	acl    *store.ACLManager  // ACL authentication and authorization
+	acl    *store.ACLManager // ACL authentication and authorization
 	ln     net.Listener
 
 	// connection management
@@ -261,13 +261,13 @@ func (s *Server) ConfigureACL(requireAuth bool, defaultPassword string) error {
 			return fmt.Errorf("failed to require authentication: %v", err)
 		}
 	}
-	
+
 	if defaultPassword != "" {
 		if err := s.acl.SetDefaultUserPassword(defaultPassword); err != nil {
 			return fmt.Errorf("failed to set default password: %v", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -423,6 +423,8 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleSET(c, v)
 			case "GET":
 				s.handleGET(c, v)
+			case "EXISTS":
+				s.handleExists(c, v)
 			case "DEL":
 				s.handleDel(c, v)
 			case "TTL":

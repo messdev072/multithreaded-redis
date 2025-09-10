@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -333,6 +334,12 @@ func (s *Store) SAdd(key string, members ...string) int {
 		}
 	}
 	s.data[key] = val
+
+	// Log to AOF if any members were added
+	if added > 0 {
+		s.logToAOF("SADD", append([]string{key}, members...)...)
+	}
+
 	return added
 }
 
@@ -358,6 +365,12 @@ func (s *Store) SRem(key string, members ...string) int {
 			removed++
 		}
 	}
+
+	// Log to AOF if any members were removed
+	if removed > 0 {
+		s.logToAOF("SREM", append([]string{key}, members...)...)
+	}
+
 	return removed
 }
 
@@ -636,6 +649,11 @@ func (s *Store) SPop(key string, count int) []string {
 		delete(val.Set, m)
 	}
 
+	// Log to AOF
+	if len(selected) > 0 {
+		s.logToAOF("SPOP", append([]string{key}, selected...)...)
+	}
+
 	// If empty after removal, delete key entirely
 	if len(val.Set) == 0 {
 		delete(s.data, key)
@@ -723,6 +741,11 @@ func (s *Store) HDel(key string, fields ...string) int {
 		}
 	}
 
+	// Log to AOF if any fields were deleted
+	if deleted > 0 {
+		s.logToAOF("HDEL", append([]string{key}, fields...)...)
+	}
+
 	if len(val.Hash) == 0 {
 		delete(s.data, key)
 	} else {
@@ -780,6 +803,9 @@ func (s *Store) CMSIncr(key, item string, count uint32) {
 	val.CMS.Incr(item, count)
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
+
+	// Log to AOF
+	s.logToAOF("CMS.INCR", key, item, fmt.Sprintf("%d", count))
 }
 
 // CMS.QUERY key item
@@ -825,6 +851,10 @@ func (s *Store) LPush(key string, values ...string) int {
 	}
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
+
+	// Log to AOF
+	s.logToAOF("LPUSH", append([]string{key}, values...)...)
+
 	return len(val.List)
 }
 
@@ -847,6 +877,10 @@ func (s *Store) RPush(key string, values ...string) int {
 	val.List = append(val.List, values...)
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
+
+	// Log to AOF
+	s.logToAOF("RPUSH", append([]string{key}, values...)...)
+
 	return len(val.List)
 }
 
@@ -869,6 +903,10 @@ func (s *Store) LPop(key string) (string, bool) {
 	item := val.List[0]
 	val.List = val.List[1:]
 	s.data[key] = val
+
+	// Log to AOF
+	s.logToAOF("LPOP", key)
+
 	return item, true
 }
 
@@ -892,6 +930,10 @@ func (s *Store) RPop(key string) (string, bool) {
 	item := val.List[idx]
 	val.List = val.List[:idx]
 	s.data[key] = val
+
+	// Log to AOF
+	s.logToAOF("RPOP", key)
+
 	return item, true
 }
 
@@ -984,6 +1026,12 @@ func (s *Store) ZAdd(key string, members map[string]float64) int {
 	}
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
+
+	// Log to AOF
+	for member, score := range members {
+		s.logToAOF("ZADD", key, fmt.Sprintf("%f", score), member)
+	}
+
 	return added
 }
 
@@ -1154,6 +1202,10 @@ func (s *Store) BFAdd(key, item string) bool {
 			Type: BFType,
 			BF:   bf,
 		}
+
+		// Log to AOF
+		s.logToAOF("BF.ADD", key, item)
+
 		return true
 	}
 
@@ -1164,6 +1216,10 @@ func (s *Store) BFAdd(key, item string) bool {
 	val.BF.Add(item)
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
+
+	// Log to AOF
+	s.logToAOF("BF.ADD", key, item)
+
 	return true
 }
 
@@ -1307,12 +1363,97 @@ func (s *Store) replayCommand(cmd []string) error {
 		// Replay HSET without logging to AOF again
 		s.hsetWithoutAOF(cmd[1], cmd[2], cmd[3])
 
+	case "HDEL":
+		if len(cmd) < 3 {
+			return fmt.Errorf("HDEL command requires at least 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay HDEL without logging to AOF again
+		s.hdelWithoutAOF(cmd[1], cmd[2:]...)
+
 	case "DEL":
 		if len(cmd) < 2 {
 			return fmt.Errorf("DEL command requires at least 1 argument, got %d", len(cmd)-1)
 		}
 		// Replay DEL without logging to AOF again
 		s.deleteWithoutAOF(cmd[1])
+
+	case "SADD":
+		if len(cmd) < 3 {
+			return fmt.Errorf("SADD command requires at least 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay SADD without logging to AOF again
+		s.saddWithoutAOF(cmd[1], cmd[2:]...)
+
+	case "SREM":
+		if len(cmd) < 3 {
+			return fmt.Errorf("SREM command requires at least 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay SREM without logging to AOF again
+		s.sremWithoutAOF(cmd[1], cmd[2:]...)
+
+	case "SPOP":
+		if len(cmd) < 3 {
+			return fmt.Errorf("SPOP command requires at least 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay SPOP without logging to AOF again
+		s.spopWithoutAOF(cmd[1], cmd[2:]...)
+
+	case "LPUSH":
+		if len(cmd) < 3 {
+			return fmt.Errorf("LPUSH command requires at least 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay LPUSH without logging to AOF again
+		s.lpushWithoutAOF(cmd[1], cmd[2:]...)
+
+	case "RPUSH":
+		if len(cmd) < 3 {
+			return fmt.Errorf("RPUSH command requires at least 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay RPUSH without logging to AOF again
+		s.rpushWithoutAOF(cmd[1], cmd[2:]...)
+
+	case "LPOP":
+		if len(cmd) != 2 {
+			return fmt.Errorf("LPOP command requires 1 argument, got %d", len(cmd)-1)
+		}
+		// Replay LPOP without logging to AOF again
+		s.lpopWithoutAOF(cmd[1])
+
+	case "RPOP":
+		if len(cmd) != 2 {
+			return fmt.Errorf("RPOP command requires 1 argument, got %d", len(cmd)-1)
+		}
+		// Replay RPOP without logging to AOF again
+		s.rpopWithoutAOF(cmd[1])
+
+	case "ZADD":
+		if len(cmd) != 4 {
+			return fmt.Errorf("ZADD command requires 3 arguments, got %d", len(cmd)-1)
+		}
+		// Replay ZADD without logging to AOF again
+		score, err := strconv.ParseFloat(cmd[2], 64)
+		if err != nil {
+			return fmt.Errorf("ZADD invalid score: %v", err)
+		}
+		s.zaddWithoutAOF(cmd[1], cmd[3], score)
+
+	case "BF.ADD":
+		if len(cmd) != 3 {
+			return fmt.Errorf("BF.ADD command requires 2 arguments, got %d", len(cmd)-1)
+		}
+		// Replay BF.ADD without logging to AOF again
+		s.bfaddWithoutAOF(cmd[1], cmd[2])
+
+	case "CMS.INCR":
+		if len(cmd) != 4 {
+			return fmt.Errorf("CMS.INCR command requires 3 arguments, got %d", len(cmd)-1)
+		}
+		// Replay CMS.INCR without logging to AOF again
+		count, err := strconv.ParseUint(cmd[3], 10, 32)
+		if err != nil {
+			return fmt.Errorf("CMS.INCR invalid count: %v", err)
+		}
+		s.cmsincrWithoutAOF(cmd[1], cmd[2], uint32(count))
 
 	default:
 		log.Printf("AOF: Unknown command for replay: %s", command)
@@ -1429,4 +1570,280 @@ func (s *Store) IsRDBSaveInProgress() bool {
 		return false
 	}
 	return s.rdb.IsSaveInProgress()
+}
+
+// hdelWithoutAOF deletes hash fields without logging to AOF (used during recovery)
+func (s *Store) hdelWithoutAOF(key string, fields ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != HashType {
+		return
+	}
+
+	for _, f := range fields {
+		delete(val.Hash, f)
+	}
+
+	if len(val.Hash) == 0 {
+		delete(s.data, key)
+	} else {
+		val.LastAccess = time.Now().UnixNano()
+		s.data[key] = val
+	}
+	// No AOF logging during recovery
+}
+
+// saddWithoutAOF adds set members without logging to AOF (used during recovery)
+func (s *Store) saddWithoutAOF(key string, members ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		// expired key is like it never existed
+	}
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{Type: SetType, Set: make(map[string]struct{})}
+		s.data[key] = val
+	}
+
+	if val.Type != SetType {
+		return
+	}
+
+	for _, m := range members {
+		val.Set[m] = struct{}{}
+	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// sremWithoutAOF removes set members without logging to AOF (used during recovery)
+func (s *Store) sremWithoutAOF(key string, members ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		return
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return
+	}
+
+	for _, m := range members {
+		delete(val.Set, m)
+	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// spopWithoutAOF removes set members without logging to AOF (used during recovery)
+func (s *Store) spopWithoutAOF(key string, members ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		return
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != SetType {
+		return
+	}
+
+	for _, m := range members {
+		delete(val.Set, m)
+	}
+
+	if len(val.Set) == 0 {
+		delete(s.data, key)
+	} else {
+		val.LastAccess = time.Now().UnixNano()
+		s.data[key] = val
+	}
+	// No AOF logging during recovery
+}
+
+// lpushWithoutAOF pushes to list head without logging to AOF (used during recovery)
+func (s *Store) lpushWithoutAOF(key string, values ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{
+			Type: ListType,
+			List: []string{},
+		}
+		s.data[key] = val
+	}
+	if val.Type != ListType {
+		return
+	}
+
+	// Prepend (reverse order for multiple push)
+	for i := len(values) - 1; i >= 0; i-- {
+		val.List = append([]string{values[i]}, val.List...)
+	}
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// rpushWithoutAOF pushes to list tail without logging to AOF (used during recovery)
+func (s *Store) rpushWithoutAOF(key string, values ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{
+			Type: ListType,
+			List: []string{},
+		}
+		s.data[key] = val
+	}
+	if val.Type != ListType {
+		return
+	}
+
+	val.List = append(val.List, values...)
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// lpopWithoutAOF pops from list head without logging to AOF (used during recovery)
+func (s *Store) lpopWithoutAOF(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ListType || len(val.List) == 0 {
+		return
+	}
+
+	val.List = val.List[1:]
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// rpopWithoutAOF pops from list tail without logging to AOF (used during recovery)
+func (s *Store) rpopWithoutAOF(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+		return
+	}
+
+	val, ok := s.data[key]
+	if !ok || val.Type != ListType || len(val.List) == 0 {
+		return
+	}
+
+	idx := len(val.List) - 1
+	val.List = val.List[:idx]
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// zaddWithoutAOF adds sorted set member without logging to AOF (used during recovery)
+func (s *Store) zaddWithoutAOF(key, member string, score float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{
+			Type: ZSetType,
+			ZSet: make(map[string]float64),
+		}
+		s.data[key] = val
+	}
+	if val.Type != ZSetType {
+		return
+	}
+
+	val.ZSet[member] = score
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// bfaddWithoutAOF adds to bloom filter without logging to AOF (used during recovery)
+func (s *Store) bfaddWithoutAOF(key, item string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+	}
+
+	// Get or create BloomFilter
+	val, ok := s.data[key]
+	if !ok || val.Type != BFType {
+		bf := datastuctures.NewBloomFilter(1_000_000, 7)
+		bf.Add(item)
+		s.data[key] = Value{
+			Type: BFType,
+			BF:   bf,
+		}
+		return
+	}
+
+	if val.Type != BFType {
+		return
+	}
+
+	val.BF.Add(item)
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
+}
+
+// cmsincrWithoutAOF increments CMS without logging to AOF (used during recovery)
+func (s *Store) cmsincrWithoutAOF(key, item string, count uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.expired(key) {
+		delete(s.data, key)
+	}
+
+	val, ok := s.data[key]
+	if !ok {
+		val = Value{
+			Type: CMSType,
+			CMS:  datastuctures.NewCountMinSketch(4, 1000),
+		}
+	}
+	if val.Type != CMSType {
+		return
+	}
+
+	val.CMS.Incr(item, count)
+	val.LastAccess = time.Now().UnixNano()
+	s.data[key] = val
+	// No AOF logging during recovery
 }

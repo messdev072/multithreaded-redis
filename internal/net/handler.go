@@ -19,7 +19,7 @@ func (s *Server) handleSET(c net.Conn, args protocol.Array) {
 	}
 
 	key, _ := args[1].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SET", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
@@ -54,13 +54,13 @@ func (s *Server) handleGET(c net.Conn, args protocol.Array) {
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "GET", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	val, ok := s.shards.Get(string(key))
 	if !ok {
 		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
@@ -69,13 +69,42 @@ func (s *Server) handleGET(c net.Conn, args protocol.Array) {
 	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
 }
 
+// Handle EXISTS command
+func (s *Server) handleExists(c net.Conn, args protocol.Array) {
+	if len(args) < 2 {
+		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'EXISTS' command"))))
+		return
+	}
+
+	count := 0
+	for i := 1; i < len(args); i++ {
+		key, ok := args[i].(protocol.BulkString)
+		if !ok {
+			continue
+		}
+
+		// Check authentication and permissions
+		if err := s.checkAuth(c, "EXISTS", string(key)); err != nil {
+			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			return
+		}
+
+		_, exists := s.shards.Get(string(key))
+		if exists {
+			count++
+		}
+	}
+
+	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+}
+
 // Handle DEL command
 func (s *Server) handleDel(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'DEL' command"))))
 		return
 	}
-	
+
 	// Check authentication and permissions for all keys
 	for i := 1; i < len(args); i++ {
 		key, ok := args[i].(protocol.BulkString)
@@ -87,7 +116,7 @@ func (s *Server) handleDel(c net.Conn, args protocol.Array) {
 			return
 		}
 	}
-	
+
 	deleted := 0
 	for i := 1; i < len(args); i++ {
 		key, ok := args[i].(protocol.BulkString)
@@ -109,13 +138,13 @@ func (s *Server) handleTTL(c net.Conn, args protocol.Array) {
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "TTL", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("TTL", string(key))
 	if ttl, ok := res.(int64); ok {
 		c.Write([]byte(protocol.Encode(protocol.Integer(ttl))))
@@ -129,13 +158,13 @@ func (s *Server) handleSAdd(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SADD", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	members := []string{}
 	for i := 2; i < len(args); i++ {
 		members = append(members, string(args[i].(protocol.BulkString)))
@@ -154,13 +183,13 @@ func (s *Server) handleSRem(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SREM", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	members := []string{}
 	for i := 2; i < len(args); i++ {
 		members = append(members, string(args[i].(protocol.BulkString)))
@@ -179,13 +208,13 @@ func (s *Server) handleSMembers(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SMEMBERS", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("SMEMBERS", key)
 	members, _ := res.([]string)
 	arr := make([]protocol.RESPType, 0, len(members))
@@ -201,13 +230,13 @@ func (s *Server) handleSCard(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SCARD", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("SCARD", key)
 	if card, ok := res.(int); ok {
 		c.Write([]byte(protocol.Encode(protocol.Integer(card))))
@@ -368,13 +397,13 @@ func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SRANDMEMBER", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	count := 0
 
 	if len(args) > 2 {
@@ -462,13 +491,13 @@ func (s *Server) handleHDel(c net.Conn, args protocol.Array) {
 	}
 
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "HDEL", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	fields := make([]string, 0, len(args)-2)
 	for _, a := range args[2:] {
 		fields = append(fields, string(a.(protocol.BulkString)))
@@ -486,13 +515,13 @@ func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 	}
 
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "HGETALL", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("HGETALL", key)
 	result, _ := res.(map[string]string)
 
@@ -520,13 +549,13 @@ func (s *Server) handleCMSIncr(c net.Conn, args protocol.Array) {
 	key := string(args[1].(protocol.BulkString))
 	item := string(args[2].(protocol.BulkString))
 	countStr := string(args[3].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "CMSINCR", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	count, err := strconv.Atoi(countStr)
 	if err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid count"))))
@@ -637,13 +666,13 @@ func (s *Server) handleRPop(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "RPOP", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("RPOP", key)
 	val, ok := res.(string)
 	if !ok {
@@ -661,13 +690,13 @@ func (s *Server) handleLLen(c net.Conn, args protocol.Array) {
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "LLEN", key); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("LLEN", key)
 	length, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(length))))
@@ -713,13 +742,13 @@ func (s *Server) handleZAdd(c net.Conn, args protocol.Array) {
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZADD", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	members := make(map[string]float64)
 	for i := 2; i+1 < len(args); i += 2 {
 		scoreStr, _ := args[i].(protocol.BulkString)
@@ -749,13 +778,13 @@ func (s *Server) handleZScore(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	member, _ := args[2].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZSCORE", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("ZSCORE", string(key), string(member))
 	score, ok := res.(float64)
 	if !ok {
@@ -772,13 +801,13 @@ func (s *Server) handleZCard(c net.Conn, args protocol.Array) {
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZCARD", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("ZCARD", string(key))
 	count, _ := res.(int)
 	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
@@ -792,13 +821,13 @@ func (s *Server) handleZRank(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	member, _ := args[2].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZRANK", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("ZRANK", string(key), string(member))
 	rank, ok := res.(int)
 	if !ok {
@@ -815,13 +844,13 @@ func (s *Server) handleZRange(c net.Conn, args protocol.Array) {
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZRANGE", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	start, err1 := strconv.Atoi(string(args[2].(protocol.BulkString)))
 	stop, err2 := strconv.Atoi(string(args[3].(protocol.BulkString)))
 	withScores := false
@@ -855,13 +884,13 @@ func (s *Server) handleBFAdd(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	item, _ := args[2].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "BFADD", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("BFADD", string(key), string(item))
 	ok, _ := res.(bool)
 	if ok {
@@ -879,13 +908,13 @@ func (s *Server) handleBFExists(c net.Conn, args protocol.Array) {
 	}
 	key, _ := args[1].(protocol.BulkString)
 	item, _ := args[2].(protocol.BulkString)
-	
+
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "BFEXISTS", string(key)); err != nil {
 		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
 		return
 	}
-	
+
 	res := s.shards.Execute("BFEXISTS", string(key), string(item))
 	ok, _ := res.(bool)
 	if ok {
@@ -1081,7 +1110,7 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 		}
 		s.connStates[c] = state
 	}
-	
+
 	// Initialize message channel if not already done
 	if state.msgCh == nil {
 		state.msgCh = make(chan store.PubSubMessage, 100)
@@ -1160,19 +1189,19 @@ func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
 	s.mu.RLock()
 	state, exists := s.connStates[c]
 	s.mu.RUnlock()
-	
+
 	if !exists || state.msgCh == nil {
 		// Connection is not in subscription mode
 		c.Write([]byte(protocol.Encode(protocol.Error("ERR connection is not subscribed"))))
 		return
 	}
-	
+
 	var channelsToUnsubscribe []string
-	
+
 	if len(args) == 1 {
 		// Unsubscribe from all channels
 		log.Printf("DEBUG: Unsubscribing from all channels")
-		
+
 		state.mu.RLock()
 		channelsToUnsubscribe = make([]string, 0, len(state.channels))
 		for channel := range state.channels {
@@ -1184,7 +1213,7 @@ func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
 		channelsToUnsubscribe = make([]string, 0, len(args)-1)
 		for i := 1; i < len(args); i++ {
 			channel := string(args[i].(protocol.BulkString))
-			
+
 			// Only include channels we're actually subscribed to
 			state.mu.RLock()
 			if state.channels[channel] {
@@ -1200,10 +1229,10 @@ func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
 		log.Printf("DEBUG: No channels to unsubscribe from")
 		return
 	}
-	
+
 	// Use the improved Unsubscribe method that returns actually removed channels
 	removedChannels := s.pubsub.Unsubscribe(channelsToUnsubscribe, state.msgCh)
-	
+
 	log.Printf("DEBUG: Actually unsubscribed from channels: %v", removedChannels)
 
 	// Update connection state

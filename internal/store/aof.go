@@ -7,6 +7,7 @@ import (
 	"log"
 	"multithreaded-redis/internal/protocol"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,8 +124,16 @@ func (a *AOF) Close() error {
 	// Stop fsync worker
 	if a.fsyncTicker != nil {
 		a.fsyncTicker.Stop()
+		a.fsyncTicker = nil
 	}
-	close(a.stopCh)
+
+	// Close stop channel only once
+	select {
+	case <-a.stopCh:
+		// Channel already closed
+	default:
+		close(a.stopCh)
+	}
 
 	if a.file != nil {
 		// Final fsync before closing
@@ -136,11 +145,15 @@ func (a *AOF) Close() error {
 
 // fsyncWorker handles periodic fsync for AOFFsyncEverySec policy
 func (a *AOF) fsyncWorker() {
+	if a.fsyncTicker == nil {
+		return
+	}
+
 	for {
 		select {
 		case <-a.fsyncTicker.C:
 			a.mu.RLock()
-			if a.file != nil {
+			if a.file != nil && a.fsyncTicker != nil {
 				if err := a.file.Sync(); err != nil {
 					log.Printf("ERROR: Failed to fsync AOF: %v", err)
 				} else {
@@ -271,6 +284,11 @@ func (a *AOF) compactCommands(commands [][]string) [][]string {
 	// Track the latest value for each key
 	keyStates := make(map[string][]string)
 	hashStates := make(map[string]map[string]string)
+	setStates := make(map[string]map[string]struct{})
+	listStates := make(map[string][]string)
+	zsetStates := make(map[string]map[string]float64)
+	bloomStates := make(map[string][]string)        // Track items added to bloom filters
+	cmsStates := make(map[string]map[string]uint32) // Track CMS increments
 
 	for _, cmd := range commands {
 		if len(cmd) == 0 {
@@ -281,18 +299,170 @@ func (a *AOF) compactCommands(commands [][]string) [][]string {
 		case "SET":
 			if len(cmd) >= 3 {
 				keyStates[cmd[1]] = cmd
+				// Clear other data structures for this key
+				delete(hashStates, cmd[1])
+				delete(setStates, cmd[1])
+				delete(listStates, cmd[1])
+				delete(zsetStates, cmd[1])
+				delete(bloomStates, cmd[1])
+				delete(cmsStates, cmd[1])
 			}
 		case "DEL":
 			if len(cmd) >= 2 {
 				delete(keyStates, cmd[1])
 				delete(hashStates, cmd[1])
+				delete(setStates, cmd[1])
+				delete(listStates, cmd[1])
+				delete(zsetStates, cmd[1])
+				delete(bloomStates, cmd[1])
+				delete(cmsStates, cmd[1])
 			}
 		case "HSET":
 			if len(cmd) >= 4 {
+				// Clear other structures for this key
+				delete(keyStates, cmd[1])
+				delete(setStates, cmd[1])
+				delete(listStates, cmd[1])
+				delete(zsetStates, cmd[1])
+				delete(bloomStates, cmd[1])
+				delete(cmsStates, cmd[1])
+				// Set hash field
 				if hashStates[cmd[1]] == nil {
 					hashStates[cmd[1]] = make(map[string]string)
 				}
 				hashStates[cmd[1]][cmd[2]] = cmd[3]
+			}
+		case "HDEL":
+			if len(cmd) >= 3 {
+				if hashStates[cmd[1]] != nil {
+					for i := 2; i < len(cmd); i++ {
+						delete(hashStates[cmd[1]], cmd[i])
+					}
+					// Remove hash entirely if empty
+					if len(hashStates[cmd[1]]) == 0 {
+						delete(hashStates, cmd[1])
+					}
+				}
+			}
+		case "SADD":
+			if len(cmd) >= 3 {
+				// Clear other structures for this key
+				delete(keyStates, cmd[1])
+				delete(hashStates, cmd[1])
+				delete(listStates, cmd[1])
+				delete(zsetStates, cmd[1])
+				delete(bloomStates, cmd[1])
+				delete(cmsStates, cmd[1])
+				// Add to set
+				if setStates[cmd[1]] == nil {
+					setStates[cmd[1]] = make(map[string]struct{})
+				}
+				for i := 2; i < len(cmd); i++ {
+					setStates[cmd[1]][cmd[i]] = struct{}{}
+				}
+			}
+		case "SREM":
+			if len(cmd) >= 3 && setStates[cmd[1]] != nil {
+				for i := 2; i < len(cmd); i++ {
+					delete(setStates[cmd[1]], cmd[i])
+				}
+				// Remove set entirely if empty
+				if len(setStates[cmd[1]]) == 0 {
+					delete(setStates, cmd[1])
+				}
+			}
+		case "SPOP":
+			if len(cmd) >= 3 && setStates[cmd[1]] != nil {
+				for i := 2; i < len(cmd); i++ {
+					delete(setStates[cmd[1]], cmd[i])
+				}
+				// Remove set entirely if empty
+				if len(setStates[cmd[1]]) == 0 {
+					delete(setStates, cmd[1])
+				}
+			}
+		case "LPUSH", "RPUSH":
+			if len(cmd) >= 3 {
+				// Clear other structures for this key
+				delete(keyStates, cmd[1])
+				delete(hashStates, cmd[1])
+				delete(setStates, cmd[1])
+				delete(zsetStates, cmd[1])
+				delete(bloomStates, cmd[1])
+				delete(cmsStates, cmd[1])
+				// For simplicity, just recreate the list with latest state
+				// In a real implementation, you'd want to track the sequence
+				if listStates[cmd[1]] == nil {
+					listStates[cmd[1]] = []string{}
+				}
+				if cmd[0] == "LPUSH" {
+					// Prepend to list
+					for i := len(cmd) - 1; i >= 2; i-- {
+						listStates[cmd[1]] = append([]string{cmd[i]}, listStates[cmd[1]]...)
+					}
+				} else {
+					// Append to list
+					listStates[cmd[1]] = append(listStates[cmd[1]], cmd[2:]...)
+				}
+			}
+		case "LPOP", "RPOP":
+			if len(cmd) >= 2 && listStates[cmd[1]] != nil && len(listStates[cmd[1]]) > 0 {
+				if cmd[0] == "LPOP" {
+					listStates[cmd[1]] = listStates[cmd[1]][1:]
+				} else {
+					listStates[cmd[1]] = listStates[cmd[1]][:len(listStates[cmd[1]])-1]
+				}
+				// Remove list entirely if empty
+				if len(listStates[cmd[1]]) == 0 {
+					delete(listStates, cmd[1])
+				}
+			}
+		case "ZADD":
+			if len(cmd) >= 4 {
+				// Clear other structures for this key
+				delete(keyStates, cmd[1])
+				delete(hashStates, cmd[1])
+				delete(setStates, cmd[1])
+				delete(listStates, cmd[1])
+				delete(bloomStates, cmd[1])
+				delete(cmsStates, cmd[1])
+				// Add to sorted set
+				if zsetStates[cmd[1]] == nil {
+					zsetStates[cmd[1]] = make(map[string]float64)
+				}
+				// Parse score and member
+				if score, err := strconv.ParseFloat(cmd[2], 64); err == nil {
+					zsetStates[cmd[1]][cmd[3]] = score
+				}
+			}
+		case "BF.ADD":
+			if len(cmd) >= 3 {
+				// Clear other structures for this key
+				delete(keyStates, cmd[1])
+				delete(hashStates, cmd[1])
+				delete(setStates, cmd[1])
+				delete(listStates, cmd[1])
+				delete(zsetStates, cmd[1])
+				delete(cmsStates, cmd[1])
+				// Add to bloom filter items
+				bloomStates[cmd[1]] = append(bloomStates[cmd[1]], cmd[2])
+			}
+		case "CMS.INCR":
+			if len(cmd) >= 4 {
+				// Clear other structures for this key
+				delete(keyStates, cmd[1])
+				delete(hashStates, cmd[1])
+				delete(setStates, cmd[1])
+				delete(listStates, cmd[1])
+				delete(zsetStates, cmd[1])
+				delete(bloomStates, cmd[1])
+				// Add to CMS increments
+				if cmsStates[cmd[1]] == nil {
+					cmsStates[cmd[1]] = make(map[string]uint32)
+				}
+				if count, err := strconv.ParseUint(cmd[3], 10, 32); err == nil {
+					cmsStates[cmd[1]][cmd[2]] += uint32(count)
+				}
 			}
 		}
 	}
@@ -309,6 +479,47 @@ func (a *AOF) compactCommands(commands [][]string) [][]string {
 	for key, fields := range hashStates {
 		for field, value := range fields {
 			compacted = append(compacted, []string{"HSET", key, field, value})
+		}
+	}
+
+	// Add SADD commands for sets
+	for key, members := range setStates {
+		if len(members) > 0 {
+			cmd := []string{"SADD", key}
+			for member := range members {
+				cmd = append(cmd, member)
+			}
+			compacted = append(compacted, cmd)
+		}
+	}
+
+	// Add list commands (LPUSH for simplicity - could be optimized)
+	for key, items := range listStates {
+		if len(items) > 0 {
+			cmd := []string{"LPUSH", key}
+			cmd = append(cmd, items...)
+			compacted = append(compacted, cmd)
+		}
+	}
+
+	// Add ZADD commands for sorted sets
+	for key, members := range zsetStates {
+		for member, score := range members {
+			compacted = append(compacted, []string{"ZADD", key, fmt.Sprintf("%f", score), member})
+		}
+	}
+
+	// Add BF.ADD commands for bloom filters
+	for key, items := range bloomStates {
+		for _, item := range items {
+			compacted = append(compacted, []string{"BF.ADD", key, item})
+		}
+	}
+
+	// Add CMS.INCR commands for count-min sketches
+	for key, itemCounts := range cmsStates {
+		for item, count := range itemCounts {
+			compacted = append(compacted, []string{"CMS.INCR", key, item, fmt.Sprintf("%d", count)})
 		}
 	}
 
