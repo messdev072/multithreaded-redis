@@ -47,6 +47,19 @@ type Store struct {
 	rdb     *RDB     // Redis Database snapshots
 }
 
+// StoreStats contains basic statistics about a store
+type StoreStats struct {
+	KeyCount     int
+	ExpiringKeys int
+	StringKeys   int
+	SetKeys      int
+	HashKeys     int
+	ListKeys     int
+	ZSetKeys     int
+	BFKeys       int
+	CMSKeys      int
+}
+
 func (s *Store) expired(key string) bool {
 	exp, ok := s.ttl[key]
 	if !ok {
@@ -1846,4 +1859,37 @@ func (s *Store) cmsincrWithoutAOF(key, item string, count uint32) {
 	val.LastAccess = time.Now().UnixNano()
 	s.data[key] = val
 	// No AOF logging during recovery
+}
+
+// GetStats returns basic statistics about the store
+func (s *Store) GetStats() StoreStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := StoreStats{
+		KeyCount:     len(s.data),
+		ExpiringKeys: len(s.ttl),
+	}
+
+	// Count by type
+	for _, value := range s.data {
+		switch value.Type {
+		case StringType:
+			stats.StringKeys++
+		case SetType:
+			stats.SetKeys++
+		case HashType:
+			stats.HashKeys++
+		case ListType:
+			stats.ListKeys++
+		case ZSetType:
+			stats.ZSetKeys++
+		case BFType:
+			stats.BFKeys++
+		case CMSType:
+			stats.CMSKeys++
+		}
+	}
+
+	return stats
 }

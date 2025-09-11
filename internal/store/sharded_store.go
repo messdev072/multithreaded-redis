@@ -232,3 +232,16 @@ func (ss *SharedStore) Shutdown(ctx context.Context) error {
 	}
 	return nil
 }
+
+// GetShardStats returns statistics for all shards
+func (ss *SharedStore) GetShardStats() map[string]StoreStats {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+
+	stats := make(map[string]StoreStats)
+	for nodeID, shard := range ss.nodeShards {
+		stats[nodeID] = shard.Store.GetStats()
+	}
+
+	return stats
+}

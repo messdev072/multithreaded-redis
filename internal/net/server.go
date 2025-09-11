@@ -93,6 +93,9 @@ func NewServerWithAOF(addr, aofPath string) (*Server, error) {
 		debug:      true,
 	}
 
+	// Initialize server statistics
+	InitStats()
+
 	return s, nil
 }
 
@@ -136,6 +139,9 @@ func NewServerWithAOFConfig(addr, aofPath string, fsyncPolicy store.AOFFsyncPoli
 		stopOnce:   sync.Once{},
 		debug:      true,
 	}
+
+	// Initialize server statistics
+	InitStats()
 
 	return s, nil
 }
@@ -200,6 +206,9 @@ func NewServerWithAOFAndRDB(addr, aofPath, rdbPath string, fsyncPolicy store.AOF
 		stopOnce:   sync.Once{},
 		debug:      true,
 	}
+
+	// Initialize server statistics
+	InitStats()
 
 	return s, nil
 }
@@ -364,7 +373,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // handleConn processes incoming connections and RESP commands
 func (s *Server) handleConn(c net.Conn) {
+	// Increment connected clients
+	IncrementConnections()
+
 	defer func() {
+		// Decrement connected clients
+		DecrementConnections()
+
 		s.mu.Lock()
 		// Cleanup connection state and unsubscribe from all channels
 		if state, exists := s.connStates[c]; exists {
@@ -415,6 +430,9 @@ func (s *Server) handleConn(c net.Conn) {
 
 			cmdStr := string(cmd)
 			log.Printf("Received command: %s with args: %v", cmdStr, v)
+
+			// Increment command counter for statistics
+			IncrementCommands()
 
 			// Check if we're in transaction mode and should queue this command
 			inTx := s.isInTransaction(c)
@@ -521,6 +539,8 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleExec(c, v)
 			case "DISCARD":
 				s.handleDiscard(c, v)
+			case "INFO":
+				s.handleINFO(c, v)
 			default:
 				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
 			}
