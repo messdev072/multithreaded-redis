@@ -12,7 +12,7 @@ import (
 // Handle AUTH command
 func (s *Server) handleAUTH(c net.Conn, args protocol.Array) {
 	if len(args) < 2 || len(args) > 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'AUTH' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'AUTH' command"))
 		return
 	}
 
@@ -30,24 +30,24 @@ func (s *Server) handleAUTH(c net.Conn, args protocol.Array) {
 
 	user, err := s.acl.AuthenticateUser(username, password)
 	if err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	s.authenticateConnection(c, user)
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 }
 
 // Handle ACL command
 func (s *Server) handleACL(c net.Conn, args protocol.Array) {
 	// Check if user has admin privileges
 	if err := s.checkAuth(c, "ACL"); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ACL' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ACL' command"))
 		return
 	}
 
@@ -69,7 +69,7 @@ func (s *Server) handleACL(c net.Conn, args protocol.Array) {
 	case "WHOAMI":
 		s.handleACLWhoAmI(c)
 	default:
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR Unknown ACL subcommand: %s", subCmd)))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR Unknown ACL subcommand: %s", subCmd)))
 	}
 }
 
@@ -127,7 +127,7 @@ func (s *Server) handleACLList(c net.Conn) {
 		result = append(result, protocol.BulkString(config.String()))
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.Array(result))))
+	s.writeResponse(c, protocol.Array(result))
 }
 
 // ACL USERS - List all usernames
@@ -139,20 +139,20 @@ func (s *Server) handleACLUsers(c net.Conn) {
 		result = append(result, protocol.BulkString(username))
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.Array(result))))
+	s.writeResponse(c, protocol.Array(result))
 }
 
 // ACL GETUSER - Get user configuration
 func (s *Server) handleACLGetUser(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ACL GETUSER' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ACL GETUSER' command"))
 		return
 	}
 
 	username := string(args[2].(protocol.BulkString))
 	user, err := s.acl.GetUser(username)
 	if err != nil {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
 
@@ -195,13 +195,13 @@ func (s *Server) handleACLGetUser(c net.Conn, args protocol.Array) {
 	}
 	result = append(result, protocol.Array(keysArray))
 
-	c.Write([]byte(protocol.Encode(protocol.Array(result))))
+	s.writeResponse(c, protocol.Array(result))
 }
 
 // ACL SETUSER - Create or modify user
 func (s *Server) handleACLSetUser(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ACL SETUSER' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ACL SETUSER' command"))
 		return
 	}
 
@@ -212,7 +212,7 @@ func (s *Server) handleACLSetUser(c net.Conn, args protocol.Array) {
 	if err != nil {
 		err = s.acl.CreateUser(username, "")
 		if err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 			return
 		}
 	}
@@ -248,18 +248,18 @@ func (s *Server) handleACLSetUser(c net.Conn, args protocol.Array) {
 		}
 
 		if err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 			return
 		}
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 }
 
 // ACL DELUSER - Delete user
 func (s *Server) handleACLDelUser(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ACL DELUSER' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ACL DELUSER' command"))
 		return
 	}
 
@@ -272,7 +272,7 @@ func (s *Server) handleACLDelUser(c net.Conn, args protocol.Array) {
 		}
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.Integer(deleted))))
+	s.writeResponse(c, protocol.Integer(deleted))
 }
 
 // ACL CAT - List command categories
@@ -283,12 +283,12 @@ func (s *Server) handleACLCat(c net.Conn, args protocol.Array) {
 		for category := range store.CommandCategories {
 			categories = append(categories, protocol.BulkString(category))
 		}
-		c.Write([]byte(protocol.Encode(protocol.Array(categories))))
+		s.writeResponse(c, protocol.Array(categories))
 	} else if len(args) == 3 {
 		// List commands in category
 		commands, exists := store.CommandCategories[string(args[2].(protocol.BulkString))]
 		if !exists {
-			c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown category"))))
+			s.writeResponse(c, protocol.Error("ERR Unknown category"))
 			return
 		}
 
@@ -296,9 +296,9 @@ func (s *Server) handleACLCat(c net.Conn, args protocol.Array) {
 		for _, cmd := range commands {
 			result = append(result, protocol.BulkString(cmd))
 		}
-		c.Write([]byte(protocol.Encode(protocol.Array(result))))
+		s.writeResponse(c, protocol.Array(result))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ACL CAT' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ACL CAT' command"))
 	}
 }
 
@@ -309,7 +309,7 @@ func (s *Server) handleACLWhoAmI(c net.Conn) {
 	s.mu.RUnlock()
 
 	if !exists {
-		c.Write([]byte(protocol.Encode(protocol.BulkString("unknown"))))
+		s.writeResponse(c, protocol.BulkString("unknown"))
 		return
 	}
 
@@ -317,5 +317,5 @@ func (s *Server) handleACLWhoAmI(c net.Conn) {
 	username := state.user.Username
 	state.mu.RUnlock()
 
-	c.Write([]byte(protocol.Encode(protocol.BulkString(username))))
+	s.writeResponse(c, protocol.BulkString(username))
 }

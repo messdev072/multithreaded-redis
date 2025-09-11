@@ -35,7 +35,7 @@ func (s *Server) queueTransactionCommand(c net.Conn, args protocol.Array) {
 	s.mu.RUnlock()
 
 	if !exists {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR connection state not found"))))
+		s.writeResponse(c, protocol.Error("ERR connection state not found"))
 		return
 	}
 
@@ -43,19 +43,19 @@ func (s *Server) queueTransactionCommand(c net.Conn, args protocol.Array) {
 	defer state.txMu.Unlock()
 
 	if !state.inTransaction {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR command requires MULTI"))))
+		s.writeResponse(c, protocol.Error("ERR command requires MULTI"))
 		return
 	}
 
 	// Queue the command
 	state.txQueue = append(state.txQueue, args)
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("QUEUED"))))
+	s.writeResponse(c, protocol.SimpleString("QUEUED"))
 }
 
 // handleMulti starts a transaction
 func (s *Server) handleMulti(c net.Conn, args protocol.Array) {
 	if len(args) != 1 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'MULTI' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'MULTI' command"))
 		return
 	}
 
@@ -77,13 +77,13 @@ func (s *Server) handleMulti(c net.Conn, args protocol.Array) {
 	defer state.txMu.Unlock()
 
 	if state.inTransaction {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR MULTI calls can not be nested"))))
+		s.writeResponse(c, protocol.Error("ERR MULTI calls can not be nested"))
 		return
 	}
 
 	state.inTransaction = true
 	state.txQueue = make([]protocol.Array, 0)
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 
 	log.Printf("Started transaction for connection")
 }
@@ -91,7 +91,7 @@ func (s *Server) handleMulti(c net.Conn, args protocol.Array) {
 // handleExec executes all queued commands in a transaction
 func (s *Server) handleExec(c net.Conn, args protocol.Array) {
 	if len(args) != 1 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'EXEC' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'EXEC' command"))
 		return
 	}
 
@@ -100,7 +100,7 @@ func (s *Server) handleExec(c net.Conn, args protocol.Array) {
 	s.mu.RUnlock()
 
 	if !exists {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR EXEC without MULTI"))))
+		s.writeResponse(c, protocol.Error("ERR EXEC without MULTI"))
 		return
 	}
 
@@ -108,7 +108,7 @@ func (s *Server) handleExec(c net.Conn, args protocol.Array) {
 	defer state.txMu.Unlock()
 
 	if !state.inTransaction {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR EXEC without MULTI"))))
+		s.writeResponse(c, protocol.Error("ERR EXEC without MULTI"))
 		return
 	}
 
@@ -140,13 +140,13 @@ func (s *Server) handleExec(c net.Conn, args protocol.Array) {
 	}
 
 	// Send results as array
-	c.Write([]byte(protocol.Encode(protocolResults)))
+	s.writeResponse(c, protocolResults)
 }
 
 // handleDiscard discards all queued commands in a transaction
 func (s *Server) handleDiscard(c net.Conn, args protocol.Array) {
 	if len(args) != 1 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'DISCARD' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'DISCARD' command"))
 		return
 	}
 
@@ -155,7 +155,7 @@ func (s *Server) handleDiscard(c net.Conn, args protocol.Array) {
 	s.mu.RUnlock()
 
 	if !exists {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR DISCARD without MULTI"))))
+		s.writeResponse(c, protocol.Error("ERR DISCARD without MULTI"))
 		return
 	}
 
@@ -163,7 +163,7 @@ func (s *Server) handleDiscard(c net.Conn, args protocol.Array) {
 	defer state.txMu.Unlock()
 
 	if !state.inTransaction {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR DISCARD without MULTI"))))
+		s.writeResponse(c, protocol.Error("ERR DISCARD without MULTI"))
 		return
 	}
 
@@ -171,7 +171,7 @@ func (s *Server) handleDiscard(c net.Conn, args protocol.Array) {
 	state.inTransaction = false
 	state.txQueue = nil
 
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 	log.Printf("Discarded transaction for connection")
 }
 

@@ -19,6 +19,7 @@ type ConnectionState struct {
 	mu            sync.RWMutex
 	user          *store.ACLUser // authenticated user for this connection
 	authenticated bool           // whether connection is authenticated
+	conn          *BufferedConn  // buffered connection wrapper
 
 	// Transaction support
 	inTransaction bool             // whether this connection is in MULTI mode
@@ -317,10 +318,12 @@ func (s *Server) acceptLoop() {
 		}
 		s.mu.Lock()
 		s.conns[conn] = struct{}{}
+		bufferedConn := NewBufferedConn(conn, 8192) // 8KB buffer
 		s.connStates[conn] = &ConnectionState{
 			channels:      make(map[string]bool),
 			user:          s.getDefaultUser(),
 			authenticated: true, // Default user is automatically authenticated (nopass)
+			conn:          bufferedConn,
 		}
 		s.mu.Unlock()
 
@@ -372,6 +375,35 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // handleConn processes incoming connections and RESP commands
+// writeResponse writes a response using the buffered connection
+func (s *Server) writeResponse(c net.Conn, resp interface{}) {
+	s.mu.RLock()
+	state, exists := s.connStates[c]
+	s.mu.RUnlock()
+
+	if !exists || state.conn == nil {
+		log.Printf("No buffered connection found for response")
+		return
+	}
+
+	if err := state.conn.WriteResponse(resp); err != nil {
+		log.Printf("Failed to write response: %v", err)
+	}
+}
+
+// writeResponseWithError writes a response and returns any error
+func (s *Server) writeResponseWithError(c net.Conn, resp interface{}) error {
+	s.mu.RLock()
+	state, exists := s.connStates[c]
+	s.mu.RUnlock()
+
+	if !exists || state.conn == nil {
+		return fmt.Errorf("no buffered connection found for response")
+	}
+
+	return state.conn.WriteResponse(resp)
+}
+
 func (s *Server) handleConn(c net.Conn) {
 	// Increment connected clients
 	IncrementConnections()
@@ -398,6 +430,10 @@ func (s *Server) handleConn(c net.Conn) {
 				}
 				close(state.msgCh)
 			}
+			// Close buffered connection
+			if state.conn != nil {
+				state.conn.Close()
+			}
 			delete(s.connStates, c)
 		}
 		delete(s.conns, c)
@@ -405,10 +441,24 @@ func (s *Server) handleConn(c net.Conn) {
 		c.Close()
 		s.wg.Done()
 	}()
+
+	// Get the buffered connection
+	var bufferedConn *BufferedConn
+	s.mu.RLock()
+	if state, exists := s.connStates[c]; exists {
+		bufferedConn = state.conn
+	}
+	s.mu.RUnlock()
+
+	if bufferedConn == nil {
+		log.Printf("No buffered connection found for client")
+		return
+	}
+
 	r := bufio.NewReader(c)
 
 	for {
-		resp, err := protocol.ParseRESP(r)
+		resp, err := protocol.ParseRESPOptimized(r)
 		if err != nil {
 			log.Printf("failed to parse RESP: %v", err)
 			return
@@ -419,12 +469,12 @@ func (s *Server) handleConn(c net.Conn) {
 		switch v := resp.(type) {
 		case protocol.Array:
 			if len(v) == 0 {
-				c.Write([]byte(protocol.Encode(protocol.Error("ERR Empty command"))))
+				s.writeResponse(c, protocol.Error("ERR Empty command"))
 				continue
 			}
 			cmd, ok := v[0].(protocol.BulkString)
 			if !ok {
-				c.Write([]byte(protocol.Encode(protocol.Error("ERR Invalid command type"))))
+				s.writeResponse(c, protocol.Error("ERR Invalid command type"))
 				continue
 			}
 
@@ -453,7 +503,7 @@ func (s *Server) handleConn(c net.Conn) {
 				s.handleACL(c, v)
 			case "PING":
 				log.Printf("Handling PING command")
-				c.Write([]byte(protocol.Encode(protocol.SimpleString("PONG"))))
+				s.writeResponse(c, protocol.SimpleString("PONG"))
 			case "SET":
 				s.handleSET(c, v)
 			case "GET":
@@ -542,10 +592,10 @@ func (s *Server) handleConn(c net.Conn) {
 			case "INFO":
 				s.handleINFO(c, v)
 			default:
-				c.Write([]byte(protocol.Encode(protocol.Error("ERR Unknown command"))))
+				s.writeResponse(c, protocol.Error("ERR Unknown command"))
 			}
 		default:
-			c.Write([]byte(protocol.Encode(protocol.Error("ERR Invalid request"))))
+			s.writeResponse(c, protocol.Error("ERR Invalid request"))
 		}
 	}
 }

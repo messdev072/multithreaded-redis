@@ -106,8 +106,10 @@ func (s *Store) restoreFromDump(kd KeyDump) error {
 	v.LastAccess = time.Now().UnixNano()
 
 	//set into store with proper TTL handling
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	var expTime *time.Time
+	if !kd.TTL.IsZero() {
+		expTime = &kd.TTL
+	}
 
 	// Create deep copies of the maps to avoid any shared references
 	if v.Hash != nil {
@@ -132,11 +134,8 @@ func (s *Store) restoreFromDump(kd KeyDump) error {
 		v.ZSet = newZSet
 	}
 
-	// Store the value and set TTL if needed
-	s.data[kd.Key] = v
-	if !kd.TTL.IsZero() {
-		s.ttl[kd.Key] = kd.TTL
-	}
+	// Store the value using the new sharded approach
+	s.SetDataDirect(kd.Key, v, expTime)
 
 	log.Printf("DEBUG: %s - Successfully restored value with type=%d", kd.Key, v.Type)
 	if v.Type == StringType {
@@ -147,17 +146,19 @@ func (s *Store) restoreFromDump(kd KeyDump) error {
 }
 
 func (s *Store) getExpirationTime(key string) time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if expNano, ok := s.ttl[key]; ok {
-		return expNano
+	bucket := s.getBucket(key)
+	bucket.mu.RLock()
+	defer bucket.mu.RUnlock()
+	if expTime, ok := bucket.ttl[key]; ok {
+		return expTime
 	}
 	return time.Time{}
 }
 
 func (s *Store) getRaw(key string) (Value, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	v, ok := s.data[key]
+	bucket := s.getBucket(key)
+	bucket.mu.RLock()
+	defer bucket.mu.RUnlock()
+	v, ok := bucket.data[key]
 	return v, ok
 }

@@ -235,13 +235,13 @@ func (r *RDB) writeDBSelector(w *bufio.Writer, dbNum int) error {
 
 // writeKeyValuePairs writes all key-value pairs from store
 func (r *RDB) writeKeyValuePairs(w *bufio.Writer, store *Store) (int64, error) {
-	store.mu.RLock()
-	defer store.mu.RUnlock()
+	data := store.GetAllData()
+	ttl := store.GetAllTTL()
 
 	keyCount := int64(0)
-	for key, value := range store.data {
+	for key, value := range data {
 		// Check if key has expiration
-		if expTime, hasExpiry := store.ttl[key]; hasExpiry {
+		if expTime, hasExpiry := ttl[key]; hasExpiry {
 			// Write expiration time in milliseconds
 			if err := w.WriteByte(RDBExpireTimeMS); err != nil {
 				return keyCount, err
@@ -494,10 +494,7 @@ func (r *RDB) readKeyValueWithExpiry(reader *bufio.Reader, store *Store, isMilli
 	}
 
 	// Store with expiration
-	store.data[key] = value
-	if expTime.After(time.Now()) {
-		store.ttl[key] = expTime
-	}
+	store.SetDataDirect(key, value, &expTime)
 
 	return nil
 }
@@ -509,7 +506,7 @@ func (r *RDB) readKeyValue(reader *bufio.Reader, store *Store, valueType byte) e
 		return err
 	}
 
-	store.data[key] = value
+	store.SetDataDirect(key, value, nil)
 	return nil
 }
 

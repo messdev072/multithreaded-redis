@@ -11,10 +11,31 @@ import (
 	"time"
 )
 
+// extractStringArgs extracts string arguments from RESP array using pooled slices
+func extractStringArgs(args protocol.Array) []string {
+	result := store.GlobalPoolManager.GetArgs()
+	
+	for i, arg := range args {
+		if i == 0 {
+			continue // skip command name
+		}
+		if bulkStr, ok := arg.(protocol.BulkString); ok {
+			result = append(result, string(bulkStr))
+		}
+	}
+	
+	// Create a copy since we need to return the pooled slice
+	finalResult := make([]string, len(result))
+	copy(finalResult, result)
+	store.GlobalPoolManager.PutArgs(result)
+	
+	return finalResult
+}
+
 // Handle SET command with optional expiration
 func (s *Server) handleSET(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SET' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SET' command"))
 		return
 	}
 
@@ -22,7 +43,7 @@ func (s *Server) handleSET(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SET", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -36,7 +57,7 @@ func (s *Server) handleSET(c net.Conn, args protocol.Array) {
 		if string(opt) == "EX" {
 			secs, err := strconv.Atoi(string(args[4].(protocol.BulkString)))
 			if err != nil {
-				c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid expire time in 'SET' command"))))
+				s.writeResponse(c, protocol.Error("ERR invalid expire time in 'SET' command"))
 				return
 			}
 			expire = time.Duration(secs) * time.Second
@@ -44,35 +65,35 @@ func (s *Server) handleSET(c net.Conn, args protocol.Array) {
 	}
 
 	s.shards.Set(string(key), []byte(val), expire)
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 }
 
 // Handle GET command
 func (s *Server) handleGET(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'GET' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'GET' command"))
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "GET", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	val, ok := s.shards.Get(string(key))
 	if !ok {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
-	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
+	s.writeResponse(c, protocol.BulkString(val))
 }
 
 // Handle EXISTS command
 func (s *Server) handleExists(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'EXISTS' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'EXISTS' command"))
 		return
 	}
 
@@ -85,7 +106,7 @@ func (s *Server) handleExists(c net.Conn, args protocol.Array) {
 
 		// Check authentication and permissions
 		if err := s.checkAuth(c, "EXISTS", string(key)); err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 			return
 		}
 
@@ -95,13 +116,13 @@ func (s *Server) handleExists(c net.Conn, args protocol.Array) {
 		}
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+	s.writeResponse(c, protocol.Integer(count))
 }
 
 // Handle DEL command
 func (s *Server) handleDel(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'DEL' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'DEL' command"))
 		return
 	}
 
@@ -112,7 +133,7 @@ func (s *Server) handleDel(c net.Conn, args protocol.Array) {
 			continue
 		}
 		if err := s.checkAuth(c, "DEL", string(key)); err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 			return
 		}
 	}
@@ -128,40 +149,40 @@ func (s *Server) handleDel(c net.Conn, args protocol.Array) {
 			deleted++
 		}
 	}
-	c.Write([]byte(protocol.Encode(protocol.Integer(deleted))))
+	s.writeResponse(c, protocol.Integer(deleted))
 }
 
 // Handle TTL command
 func (s *Server) handleTTL(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'TTL' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'TTL' command"))
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "TTL", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("TTL", string(key))
 	if ttl, ok := res.(int64); ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(ttl))))
+		s.writeResponse(c, protocol.Integer(ttl))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(-2))))
+		s.writeResponse(c, protocol.Integer(-2))
 	}
 }
 func (s *Server) handleSAdd(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SADD' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SADD' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SADD", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -171,22 +192,22 @@ func (s *Server) handleSAdd(c net.Conn, args protocol.Array) {
 	}
 	res := s.shards.Execute("SADD", key, members...)
 	if added, ok := res.(int); ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(added))))
+		s.writeResponse(c, protocol.Integer(added))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+		s.writeResponse(c, protocol.Integer(0))
 	}
 }
 
 func (s *Server) handleSRem(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SREM' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SREM' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SREM", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -196,22 +217,22 @@ func (s *Server) handleSRem(c net.Conn, args protocol.Array) {
 	}
 	res := s.shards.Execute("SREM", key, members...)
 	if removed, ok := res.(int); ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(removed))))
+		s.writeResponse(c, protocol.Integer(removed))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+		s.writeResponse(c, protocol.Integer(0))
 	}
 }
 
 func (s *Server) handleSMembers(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SMEMBERS' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SMEMBERS' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SMEMBERS", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -221,33 +242,33 @@ func (s *Server) handleSMembers(c net.Conn, args protocol.Array) {
 	for _, m := range members {
 		arr = append(arr, protocol.BulkString(m))
 	}
-	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+	s.writeResponse(c, protocol.Array(arr))
 }
 
 func (s *Server) handleSCard(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SCARD' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SCARD' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SCARD", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("SCARD", key)
 	if card, ok := res.(int); ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(card))))
+		s.writeResponse(c, protocol.Integer(card))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+		s.writeResponse(c, protocol.Integer(0))
 	}
 }
 
 func (s *Server) handleSIsMember(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of argumments for 'SIMEMBER' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of argumments for 'SIMEMBER' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
@@ -255,21 +276,21 @@ func (s *Server) handleSIsMember(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SISMEMBER", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("SISMEMBER", key, member)
 	if ok, _ := res.(bool); ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
+		s.writeResponse(c, protocol.Integer(1))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+		s.writeResponse(c, protocol.Integer(0))
 	}
 }
 
 func (s *Server) handleSUnion(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SUNION' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SUNION' command"))
 		return
 	}
 	keys := make([]string, 0, len(args)-1)
@@ -280,7 +301,7 @@ func (s *Server) handleSUnion(c net.Conn, args protocol.Array) {
 	// Check authentication and permissions for all keys
 	for _, key := range keys {
 		if err := s.checkAuth(c, "SUNION", key); err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 			return
 		}
 	}
@@ -291,12 +312,12 @@ func (s *Server) handleSUnion(c net.Conn, args protocol.Array) {
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
 	}
-	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+	s.writeResponse(c, protocol.Array(arr))
 }
 
 func (s *Server) handleSInter(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SINTER' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SINTER' command"))
 		return
 	}
 
@@ -308,7 +329,7 @@ func (s *Server) handleSInter(c net.Conn, args protocol.Array) {
 	// Check authentication and permissions for all keys
 	for _, key := range keys {
 		if err := s.checkAuth(c, "SINTER", key); err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 			return
 		}
 	}
@@ -319,12 +340,12 @@ func (s *Server) handleSInter(c net.Conn, args protocol.Array) {
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
 	}
-	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+	s.writeResponse(c, protocol.Array(arr))
 }
 
 func (s *Server) handleSDiff(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SDIFF' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SDIFF' command"))
 		return
 	}
 
@@ -336,7 +357,7 @@ func (s *Server) handleSDiff(c net.Conn, args protocol.Array) {
 	// Check authentication and permissions for all keys
 	for _, key := range keys {
 		if err := s.checkAuth(c, "SDIFF", key); err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+			s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 			return
 		}
 	}
@@ -347,19 +368,19 @@ func (s *Server) handleSDiff(c net.Conn, args protocol.Array) {
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
 	}
-	c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+	s.writeResponse(c, protocol.Array(arr))
 }
 
 func (s *Server) handleSPop(c net.Conn, args protocol.Array) {
 	if len(args) < 2 || len(args) > 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SPOP' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SPOP' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SPOP", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -367,7 +388,7 @@ func (s *Server) handleSPop(c net.Conn, args protocol.Array) {
 	if len(args) == 3 {
 		n, err := strconv.Atoi(string(args[2].(protocol.BulkString)))
 		if err != nil || n < 0 {
-			c.Write([]byte(protocol.Encode(protocol.Error("ERR value is not an integer or out of range"))))
+			s.writeResponse(c, protocol.Error("ERR value is not an integer or out of range"))
 			return
 		}
 		count = n
@@ -376,31 +397,31 @@ func (s *Server) handleSPop(c net.Conn, args protocol.Array) {
 	res := s.shards.Execute("SPOP", key, fmt.Sprintf("%d", count))
 	result, _ := res.([]string)
 	if result == nil {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR null"))))
+		s.writeResponse(c, protocol.Error("ERR null"))
 		return
 	}
 
 	if count == 1 {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(result[0]))))
+		s.writeResponse(c, protocol.BulkString(result[0]))
 	} else {
 		arr := make([]protocol.RESPType, len(result))
 		for i, v := range result {
 			arr[i] = protocol.BulkString(v)
 		}
-		c.Write([]byte(protocol.Encode(protocol.Array(arr))))
+		s.writeResponse(c, protocol.Array(arr))
 	}
 }
 
 func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SRANDMEMBER' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SRANDMEMBER' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "SRANDMEMBER", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -409,7 +430,7 @@ func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 	if len(args) > 2 {
 		n, err := strconv.Atoi(string(args[2].(protocol.BulkString)))
 		if err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error("ERR value is not an integer or out of range"))))
+			s.writeResponse(c, protocol.Error("ERR value is not an integer or out of range"))
 			return
 		}
 		count = n
@@ -418,13 +439,13 @@ func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 	res := s.shards.Execute("SRANDMEMBER", key, fmt.Sprintf("%d", count))
 	result, _ := res.([]string)
 	if result == nil {
-		c.Write([]byte(protocol.Encode(protocol.Array(nil))))
+		s.writeResponse(c, protocol.Array(nil))
 		return
 	}
 
 	if count == 0 {
 		//single value
-		c.Write([]byte(protocol.Encode(protocol.BulkString(result[0]))))
+		s.writeResponse(c, protocol.BulkString(result[0]))
 		return
 	}
 
@@ -433,12 +454,12 @@ func (s *Server) handleSRandMember(c net.Conn, args protocol.Array) {
 	for _, v := range result {
 		arr = append(arr, protocol.BulkString(v))
 	}
-	c.Write([]byte(protocol.Encode(arr)))
+	s.writeResponse(c, arr)
 }
 
 func (s *Server) handleHSet(c net.Conn, args protocol.Array) {
 	if len(args) < 4 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HSET' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'HSET' command"))
 		return
 	}
 
@@ -448,21 +469,21 @@ func (s *Server) handleHSet(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "HSET", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("HSET", key, field, value)
 	if n, ok := res.(int); ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(n))))
+		s.writeResponse(c, protocol.Integer(n))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+		s.writeResponse(c, protocol.Integer(0))
 	}
 }
 
 func (s *Server) handleHGet(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HGET' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'HGET' command"))
 		return
 	}
 
@@ -471,22 +492,22 @@ func (s *Server) handleHGet(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "HGET", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("HGET", key, field)
 	val, ok := res.(string)
 	if !ok {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
-	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
+	s.writeResponse(c, protocol.BulkString(val))
 }
 
 func (s *Server) handleHDel(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HDEL' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'HDEL' command"))
 		return
 	}
 
@@ -494,7 +515,7 @@ func (s *Server) handleHDel(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "HDEL", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -505,12 +526,12 @@ func (s *Server) handleHDel(c net.Conn, args protocol.Array) {
 
 	res := s.shards.Execute("HDEL", key, fields...)
 	deleted, _ := res.(int)
-	c.Write([]byte(protocol.Encode(protocol.Integer(deleted))))
+	s.writeResponse(c, protocol.Integer(deleted))
 }
 
 func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'HGETALL' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'HGETALL' command"))
 		return
 	}
 
@@ -518,7 +539,7 @@ func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "HGETALL", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -527,7 +548,7 @@ func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 
 	if result == nil {
 		// Redis returns empty array for non-existing or non-hash key
-		c.Write([]byte(protocol.Encode(protocol.Array{})))
+		s.writeResponse(c, protocol.Array{})
 		return
 	}
 
@@ -536,13 +557,13 @@ func (s *Server) handleHGetAll(c net.Conn, args protocol.Array) {
 		arr = append(arr, protocol.BulkString(field), protocol.BulkString(val))
 	}
 
-	c.Write([]byte(protocol.Encode(arr)))
+	s.writeResponse(c, arr)
 }
 
 // CMS.INCR key item count
 func (s *Server) handleCMSIncr(c net.Conn, args protocol.Array) {
 	if len(args) != 4 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMSINCR'"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'CMSINCR'"))
 		return
 	}
 
@@ -552,24 +573,24 @@ func (s *Server) handleCMSIncr(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "CMSINCR", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	count, err := strconv.Atoi(countStr)
 	if err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid count"))))
+		s.writeResponse(c, protocol.Error("ERR invalid count"))
 		return
 	}
 
 	s.shards.Execute("CMSINCR", key, item, fmt.Sprintf("%d", count))
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 }
 
 // CMS.QUERY key item
 func (s *Server) handleCMSQuery(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'CMSQUERY'"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'CMSQUERY'"))
 		return
 	}
 
@@ -578,26 +599,26 @@ func (s *Server) handleCMSQuery(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "CMSQUERY", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("CMSQUERY", key, item)
 	count, _ := res.(uint32)
-	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+	s.writeResponse(c, protocol.Integer(count))
 }
 
 // LPUSH key value [value ...]
 func (s *Server) handleLPush(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LPUSH' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'LPUSH' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "LPUSH", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -608,20 +629,20 @@ func (s *Server) handleLPush(c net.Conn, args protocol.Array) {
 
 	res := s.shards.Execute("LPUSH", key, values...)
 	newLen, _ := res.(int)
-	c.Write([]byte(protocol.Encode(protocol.Integer(newLen))))
+	s.writeResponse(c, protocol.Integer(newLen))
 }
 
 // RPUSH key value [value ...]
 func (s *Server) handleRPush(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'RPUSH' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'RPUSH' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "RPUSH", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -632,80 +653,80 @@ func (s *Server) handleRPush(c net.Conn, args protocol.Array) {
 
 	res := s.shards.Execute("RPUSH", key, values...)
 	newLen, _ := res.(int)
-	c.Write([]byte(protocol.Encode(protocol.Integer(newLen))))
+	s.writeResponse(c, protocol.Integer(newLen))
 }
 
 // LPOP key
 func (s *Server) handleLPop(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LPOP' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'LPOP' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "LPOP", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("LPOP", key)
 	val, ok := res.(string)
 	if !ok {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
+	s.writeResponse(c, protocol.BulkString(val))
 }
 
 // RPOP key
 func (s *Server) handleRPop(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'RPOP' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'RPOP' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "RPOP", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("RPOP", key)
 	val, ok := res.(string)
 	if !ok {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
 
-	c.Write([]byte(protocol.Encode(protocol.BulkString(val))))
+	s.writeResponse(c, protocol.BulkString(val))
 }
 
 // LLEN key
 func (s *Server) handleLLen(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LLEN' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'LLEN' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "LLEN", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("LLEN", key)
 	length, _ := res.(int)
-	c.Write([]byte(protocol.Encode(protocol.Integer(length))))
+	s.writeResponse(c, protocol.Integer(length))
 }
 
 // LRANGE key start stop
 func (s *Server) handleLRange(c net.Conn, args protocol.Array) {
 	if len(args) != 4 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'LRANGE' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'LRANGE' command"))
 		return
 	}
 	key := string(args[1].(protocol.BulkString))
@@ -714,14 +735,14 @@ func (s *Server) handleLRange(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "LRANGE", key); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	start, err1 := strconv.Atoi(startStr)
 	stop, err2 := strconv.Atoi(stopStr)
 	if err1 != nil || err2 != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid start or stop index"))))
+		s.writeResponse(c, protocol.Error("ERR invalid start or stop index"))
 		return
 	}
 
@@ -732,20 +753,20 @@ func (s *Server) handleLRange(c net.Conn, args protocol.Array) {
 		arr = append(arr, protocol.BulkString(v))
 	}
 
-	c.Write([]byte(protocol.Encode(arr)))
+	s.writeResponse(c, arr)
 }
 
 // ZADD key score member [score member ...]
 func (s *Server) handleZAdd(c net.Conn, args protocol.Array) {
 	if len(args) < 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZADD' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ZADD' command"))
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZADD", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -755,7 +776,7 @@ func (s *Server) handleZAdd(c net.Conn, args protocol.Array) {
 		member, _ := args[i+1].(protocol.BulkString)
 		score, err := strconv.ParseFloat(string(scoreStr), 64)
 		if err != nil {
-			c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid score for 'ZADD'"))))
+			s.writeResponse(c, protocol.Error("ERR invalid score for 'ZADD'"))
 			return
 		}
 		members[string(member)] = score
@@ -767,13 +788,13 @@ func (s *Server) handleZAdd(c net.Conn, args protocol.Array) {
 	}
 	res := s.shards.Execute("ZADD", string(key), memberArgs...)
 	added, _ := res.(int)
-	c.Write([]byte(protocol.Encode(protocol.Integer(added))))
+	s.writeResponse(c, protocol.Integer(added))
 }
 
 // ZSCORE key member
 func (s *Server) handleZScore(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZSCORE' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ZSCORE' command"))
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
@@ -781,42 +802,42 @@ func (s *Server) handleZScore(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZSCORE", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("ZSCORE", string(key), string(member))
 	score, ok := res.(float64)
 	if !ok {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
-	c.Write([]byte(protocol.Encode(protocol.BulkString(fmt.Sprintf("%f", score)))))
+	s.writeResponse(c, protocol.BulkString(fmt.Sprintf("%f", score)))
 }
 
 // ZCARD key
 func (s *Server) handleZCard(c net.Conn, args protocol.Array) {
 	if len(args) != 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZCARD' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ZCARD' command"))
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZCARD", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("ZCARD", string(key))
 	count, _ := res.(int)
-	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+	s.writeResponse(c, protocol.Integer(count))
 }
 
 // ZRANK key member
 func (s *Server) handleZRank(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZRANK' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ZRANK' command"))
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
@@ -824,30 +845,30 @@ func (s *Server) handleZRank(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZRANK", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("ZRANK", string(key), string(member))
 	rank, ok := res.(int)
 	if !ok {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
-	c.Write([]byte(protocol.Encode(protocol.Integer(rank))))
+	s.writeResponse(c, protocol.Integer(rank))
 }
 
 // ZRANGE key start stop [WITHSCORES]
 func (s *Server) handleZRange(c net.Conn, args protocol.Array) {
 	if len(args) < 4 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'ZRANGE' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'ZRANGE' command"))
 		return
 	}
 	key, _ := args[1].(protocol.BulkString)
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "ZRANGE", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -860,20 +881,20 @@ func (s *Server) handleZRange(c net.Conn, args protocol.Array) {
 		}
 	}
 	if err1 != nil || err2 != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR invalid start/stop for 'ZRANGE'"))))
+		s.writeResponse(c, protocol.Error("ERR invalid start/stop for 'ZRANGE'"))
 		return
 	}
 	res := s.shards.Execute("ZRANGE", string(key), fmt.Sprintf("%d", start), fmt.Sprintf("%d", stop), fmt.Sprintf("%t", withScores))
 	result, _ := res.([]string)
 	if result == nil {
-		c.Write([]byte(protocol.Encode(protocol.BulkString(nil))))
+		s.writeResponse(c, protocol.BulkString(nil))
 		return
 	}
 	arr := make(protocol.Array, len(result))
 	for i, v := range result {
 		arr[i] = protocol.BulkString(v)
 	}
-	c.Write([]byte(protocol.Encode(arr)))
+	s.writeResponse(c, arr)
 }
 
 // BF.ADD key item
@@ -887,16 +908,16 @@ func (s *Server) handleBFAdd(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "BFADD", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("BFADD", string(key), string(item))
 	ok, _ := res.(bool)
 	if ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
+		s.writeResponse(c, protocol.Integer(1))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+		s.writeResponse(c, protocol.Integer(0))
 	}
 }
 
@@ -911,16 +932,16 @@ func (s *Server) handleBFExists(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions
 	if err := s.checkAuth(c, "BFEXISTS", string(key)); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	res := s.shards.Execute("BFEXISTS", string(key), string(item))
 	ok, _ := res.(bool)
 	if ok {
-		c.Write([]byte(protocol.Encode(protocol.Integer(1))))
+		s.writeResponse(c, protocol.Integer(1))
 	} else {
-		c.Write([]byte(protocol.Encode(protocol.Integer(0))))
+		s.writeResponse(c, protocol.Integer(0))
 	}
 }
 
@@ -934,7 +955,7 @@ func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions (admin command)
 	if err := s.checkAuth(c, "ADDNODE"); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -944,7 +965,7 @@ func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
 	newShard := store.NewShard(store.NewStore())
 	if err := s.shards.AddNode(nodeID, newShard); err != nil {
 		log.Printf("ERROR: Failed to add node %s: %v", nodeID, err)
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR failed to add node: %v", err)))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR failed to add node: %v", err)))
 		return
 	}
 
@@ -959,7 +980,7 @@ func (s *Server) handleAddNode(c net.Conn, args protocol.Array) {
 		}
 	}()
 
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 }
 
 func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
@@ -972,7 +993,7 @@ func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions (admin command)
 	if err := s.checkAuth(c, "REMOVENODE"); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -981,7 +1002,7 @@ func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
 	// Check if the node exists
 	if _, exists := s.shards.GetShardByNodeID(nodeID); !exists {
 		log.Printf("ERROR: Node %s does not exist", nodeID)
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR node %s does not exist", nodeID)))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR node %s does not exist", nodeID)))
 		return
 	}
 
@@ -1056,13 +1077,13 @@ func (s *Server) handleRemoveNode(c net.Conn, args protocol.Array) {
 	}
 	log.Printf("DEBUG: Successfully removed node %s", nodeID)
 
-	c.Write([]byte(protocol.Encode(protocol.SimpleString("OK"))))
+	s.writeResponse(c, protocol.SimpleString("OK"))
 }
 
 // Handle PUBLISH command: PUBLISH channel message
 func (s *Server) handlePublish(c net.Conn, args protocol.Array) {
 	if len(args) != 3 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'PUBLISH' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'PUBLISH' command"))
 		return
 	}
 
@@ -1071,20 +1092,20 @@ func (s *Server) handlePublish(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions for publish command
 	if err := s.checkAuth(c, "PUBLISH"); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
 	log.Printf("DEBUG: Publishing message to channel %s: %s", channel, message)
 	count := s.pubsub.Publish(channel, message)
 
-	c.Write([]byte(protocol.Encode(protocol.Integer(count))))
+	s.writeResponse(c, protocol.Integer(count))
 }
 
 // Handle SUBSCRIBE command: SUBSCRIBE channel [channel ...]
 func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 	if len(args) < 2 {
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR wrong number of arguments for 'SUBSCRIBE' command"))))
+		s.writeResponse(c, protocol.Error("ERR wrong number of arguments for 'SUBSCRIBE' command"))
 		return
 	}
 
@@ -1095,7 +1116,7 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 
 	// Check authentication and permissions for subscribe command
 	if err := s.checkAuth(c, "SUBSCRIBE"); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -1140,7 +1161,20 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 			protocol.BulkString(channel),
 			protocol.Integer(currentCount),
 		}
-		c.Write([]byte(protocol.Encode(response)))
+		s.writeResponse(c, response)
+		
+		// Force immediate flush after each subscription confirmation
+		if buffConn, ok := c.(*BufferedConn); ok {
+			buffConn.Flush()
+		} else {
+			// Check if it's in the connection state
+			s.mu.RLock()
+			if state, exists := s.connStates[c]; exists && state.conn != nil {
+				state.conn.Flush()
+			}
+			s.mu.RUnlock()
+		}
+		
 		currentCount++
 	}
 
@@ -1165,7 +1199,7 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 						protocol.BulkString(message.Channel),
 						protocol.BulkString(message.Message),
 					}
-					if _, err := c.Write([]byte(protocol.Encode(response))); err != nil {
+					if err := s.writeResponseWithError(c, response); err != nil {
 						log.Printf("Failed to send message to subscriber: %v", err)
 						return
 					}
@@ -1181,7 +1215,7 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
 	// Check authentication and permissions for unsubscribe command
 	if err := s.checkAuth(c, "UNSUBSCRIBE"); err != nil {
-		c.Write([]byte(protocol.Encode(protocol.Error(fmt.Sprintf("ERR %s", err.Error())))))
+		s.writeResponse(c, protocol.Error(fmt.Sprintf("ERR %s", err.Error())))
 		return
 	}
 
@@ -1192,7 +1226,7 @@ func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
 
 	if !exists || state.msgCh == nil {
 		// Connection is not in subscription mode
-		c.Write([]byte(protocol.Encode(protocol.Error("ERR connection is not subscribed"))))
+		s.writeResponse(c, protocol.Error("ERR connection is not subscribed"))
 		return
 	}
 
@@ -1252,7 +1286,7 @@ func (s *Server) handleUnsubscribe(c net.Conn, args protocol.Array) {
 			protocol.BulkString(channel),
 			protocol.Integer(currentCount), // remaining subscription count
 		}
-		c.Write([]byte(protocol.Encode(response)))
+		s.writeResponse(c, response)
 	}
 
 	// If we unsubscribed from all channels, close the message channel

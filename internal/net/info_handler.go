@@ -228,7 +228,7 @@ func (s *Server) handleINFO(c net.Conn, args protocol.Array) {
 
 	// Remove trailing \r\n and encode as bulk string
 	response = strings.TrimSuffix(response, "\r\n")
-	c.Write([]byte(protocol.Encode(protocol.BulkString(response))))
+	s.writeResponse(c, protocol.BulkString(response))
 }
 
 // getKeyspaceInfo returns keyspace statistics for each shard
