@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"multithreaded-redis/internal/datastuctures"
@@ -1049,9 +1050,10 @@ func (s *Store) LoadFromAOF() error {
 			continue
 		}
 
-		cmdName := cmd[0]
-		// Convert to uppercase manually
-		if cmdName == "set" || cmdName == "SET" {
+		cmdName := strings.ToUpper(cmd[0])
+
+		switch cmdName {
+		case "SET":
 			if len(cmd) >= 3 {
 				key := cmd[1]
 				value := []byte(cmd[2])
@@ -1069,7 +1071,8 @@ func (s *Store) LoadFromAOF() error {
 				bucket.Set(key, val)
 				replayCount++
 			}
-		} else if cmdName == "hset" || cmdName == "HSET" {
+
+		case "HSET":
 			if len(cmd) >= 4 {
 				key := cmd[1]
 				field := cmd[2]
@@ -1097,15 +1100,81 @@ func (s *Store) LoadFromAOF() error {
 				bucket.mu.Unlock()
 				replayCount++
 			}
-		} else if cmdName == "del" || cmdName == "DEL" {
+
+		case "SADD":
+			if len(cmd) >= 3 {
+				key := cmd[1]
+				bucket := s.getBucket(key)
+				bucket.mu.Lock()
+
+				// Get or create set
+				val, exists := bucket.data[key]
+				if !exists || val.Type != SetType {
+					val = Value{
+						Type:       SetType,
+						Set:        make(map[string]struct{}),
+						Expiration: 0,
+						LastAccess: time.Now().UnixNano(),
+					}
+				}
+
+				// Add all members to set (SADD can add multiple members)
+				for i := 2; i < len(cmd); i++ {
+					val.Set[cmd[i]] = struct{}{}
+				}
+				val.LastAccess = time.Now().UnixNano()
+				bucket.data[key] = val
+
+				bucket.mu.Unlock()
+				replayCount++
+			}
+
+		case "DEL":
 			if len(cmd) >= 2 {
 				key := cmd[1]
 				bucket := s.getBucket(key)
 				bucket.Delete(key)
 				replayCount++
 			}
+
+		case "LPUSH", "RPUSH":
+			if len(cmd) >= 3 {
+				key := cmd[1]
+				bucket := s.getBucket(key)
+				bucket.mu.Lock()
+
+				// Get or create list
+				val, exists := bucket.data[key]
+				if !exists || val.Type != ListType {
+					val = Value{
+						Type:       ListType,
+						List:       []string{},
+						Expiration: 0,
+						LastAccess: time.Now().UnixNano(),
+					}
+				}
+
+				// Add elements to list
+				for i := 2; i < len(cmd); i++ {
+					if cmdName == "LPUSH" {
+						// Prepend to front of list
+						val.List = append([]string{cmd[i]}, val.List...)
+					} else {
+						// Append to end of list
+						val.List = append(val.List, cmd[i])
+					}
+				}
+				val.LastAccess = time.Now().UnixNano()
+				bucket.data[key] = val
+
+				bucket.mu.Unlock()
+				replayCount++
+			}
+
+		default:
+			// Skip unknown commands (they'll be logged but not counted as failures)
+			continue
 		}
-		// Skip other commands for now
 	}
 
 	log.Printf("Successfully replayed %d/%d AOF commands", replayCount, len(commands))
