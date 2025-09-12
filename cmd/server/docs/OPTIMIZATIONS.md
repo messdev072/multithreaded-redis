@@ -142,7 +142,7 @@ GlobalPoolManager
 ## 🧪 Testing & Validation
 
 ### Performance Test Suite
-- **File**: `tests/performance_test.go` - Comprehensive benchmark suite
+- **File**: `tests/performance_benchmark.go` - Comprehensive benchmark suite
 - **Test Scenarios**:
   - Single client baseline
   - Lock contention stress testing (8 concurrent clients)

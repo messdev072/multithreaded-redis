@@ -50,9 +50,9 @@ func hash(key string) uint32 {
 
 type Store struct {
 	buckets [NumBuckets]*Bucket
-	ttlKeys []string // for random sampling - kept for compatibility
-	aof     *AOF     // Append Only File for persistence
-	rdb     *RDB     // Redis Database snapshots
+	//ttlKeys []string // for random sampling - kept for compatibility
+	aof *AOF // Append Only File for persistence
+	rdb *RDB // Redis Database snapshots
 }
 
 // getBucket returns the bucket for a given key

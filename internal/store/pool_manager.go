@@ -53,18 +53,22 @@ func NewPoolManager() *PoolManager {
 
 	// Initialize string slice pool
 	pm.stringSlicePool.New = func() interface{} {
-		return make([]string, 0, 16)
+		s := make([]string, 0, 16)
+		return &s
 	}
 
 	// Initialize byte slice pools
 	pm.smallBytePool.New = func() interface{} {
-		return make([]byte, 0, 1024) // 1KB
+		s := make([]byte, 0, 1024) // 1KB
+		return &s
 	}
 	pm.mediumBytePool.New = func() interface{} {
-		return make([]byte, 0, 4096) // 4KB
+		s := make([]byte, 0, 4096) // 4KB
+		return &s
 	}
 	pm.largeBytePool.New = func() interface{} {
-		return make([]byte, 0, 16384) // 16KB
+		s := make([]byte, 0, 16384) // 16KB
+		return &s
 	}
 
 	// Initialize TTL entry pool
@@ -74,7 +78,8 @@ func NewPoolManager() *PoolManager {
 
 	// Initialize command args pool
 	pm.argsPool.New = func() interface{} {
-		return make([]string, 0, 8)
+		s := make([]string, 0, 8)
+		return &s
 	}
 
 	// Initialize PubSub message pool
@@ -148,7 +153,8 @@ func (pm *PoolManager) PutMap(m map[string]interface{}) {
 
 // GetStringSlice returns a string slice from the pool
 func (pm *PoolManager) GetStringSlice() []string {
-	slice := pm.stringSlicePool.Get().([]string)
+	slicePtr := pm.stringSlicePool.Get().(*[]string)
+	slice := *slicePtr
 	return slice[:0] // reset length but keep capacity
 }
 
@@ -163,34 +169,38 @@ func (pm *PoolManager) PutStringSlice(slice []string) {
 		slice[i] = ""
 	}
 
-	pm.stringSlicePool.Put(slice[:0])
+	slice = slice[:0]
+	pm.stringSlicePool.Put(&slice)
 }
 
 // GetByteSlice returns a byte slice from the appropriate pool
 func (pm *PoolManager) GetByteSlice(size int) []byte {
 	switch {
 	case size <= 1024:
-		slice := pm.smallBytePool.Get().([]byte)
+		slicePtr := pm.smallBytePool.Get().(*[]byte)
+		slice := *slicePtr
 		if cap(slice) >= size {
 			return slice[:size]
 		}
-		pm.smallBytePool.Put(slice) // put back, wrong size
+		pm.smallBytePool.Put(slicePtr) // put back, wrong size
 		return make([]byte, size)
 
 	case size <= 4096:
-		slice := pm.mediumBytePool.Get().([]byte)
+		slicePtr := pm.mediumBytePool.Get().(*[]byte)
+		slice := *slicePtr
 		if cap(slice) >= size {
 			return slice[:size]
 		}
-		pm.mediumBytePool.Put(slice) // put back, wrong size
+		pm.mediumBytePool.Put(slicePtr) // put back, wrong size
 		return make([]byte, size)
 
 	case size <= 16384:
-		slice := pm.largeBytePool.Get().([]byte)
+		slicePtr := pm.largeBytePool.Get().(*[]byte)
+		slice := *slicePtr
 		if cap(slice) >= size {
 			return slice[:size]
 		}
-		pm.largeBytePool.Put(slice) // put back, wrong size
+		pm.largeBytePool.Put(slicePtr) // put back, wrong size
 		return make([]byte, size)
 
 	default:
@@ -208,11 +218,14 @@ func (pm *PoolManager) PutByteSlice(slice []byte) {
 
 	switch {
 	case capacity <= 1024:
-		pm.smallBytePool.Put(slice[:0])
+		slice = slice[:0]
+		pm.smallBytePool.Put(&slice)
 	case capacity <= 4096:
-		pm.mediumBytePool.Put(slice[:0])
+		slice = slice[:0]
+		pm.mediumBytePool.Put(&slice)
 	case capacity <= 16384:
-		pm.largeBytePool.Put(slice[:0])
+		slice = slice[:0]
+		pm.largeBytePool.Put(&slice)
 		// don't pool if too large
 	}
 }
@@ -233,7 +246,8 @@ func (pm *PoolManager) PutTTLEntry(entry *TTLEntry) {
 
 // GetArgs returns a string slice for command arguments
 func (pm *PoolManager) GetArgs() []string {
-	args := pm.argsPool.Get().([]string)
+	argsPtr := pm.argsPool.Get().(*[]string)
+	args := *argsPtr
 	return args[:0] // reset length but keep capacity
 }
 
@@ -248,7 +262,8 @@ func (pm *PoolManager) PutArgs(args []string) {
 		args[i] = ""
 	}
 
-	pm.argsPool.Put(args[:0])
+	args = args[:0]
+	pm.argsPool.Put(&args)
 }
 
 // GetPubSubMessage returns a PubSub message from the pool
