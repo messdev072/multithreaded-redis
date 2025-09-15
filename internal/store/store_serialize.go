@@ -16,6 +16,7 @@ type SerializedValue struct {
 	Set  map[string]struct{} // for sets
 	Hash map[string]string   // for hashes
 	CMS  []byte              // serialized CMS data
+	BF   []byte              // serialized BloomFilter data
 }
 
 func init() {
@@ -42,6 +43,16 @@ func (s *Store) serializeValue(v Value) []byte {
 			return nil
 		}
 		sv.CMS = cmsBytes
+	}
+
+	// If we have a BloomFilter, serialize it separately
+	if v.BF != nil {
+		bfBytes, err := v.BF.GobEncode()
+		if err != nil {
+			log.Printf("ERROR: Failed to encode BloomFilter: %v", err)
+			return nil
+		}
+		sv.BF = bfBytes
 	}
 
 	// Encode the serialized version
@@ -84,6 +95,15 @@ func (s *Store) restoreFromDump(kd KeyDump) error {
 			return err
 		}
 		v.CMS = cms
+	}
+	// If we have serialized BloomFilter data, deserialize it
+	if len(sv.BF) > 0 {
+		bf := &datastuctures.BloomFilter{}
+		if err := bf.GobDecode(sv.BF); err != nil {
+			log.Printf("ERROR: Failed to decode BloomFilter: %v", err)
+			return err
+		}
+		v.BF = bf
 	}
 
 	// Initialize nil maps if needed

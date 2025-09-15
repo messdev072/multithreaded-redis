@@ -1,6 +1,22 @@
 package datastuctures
 
-import "hash/fnv"
+import (
+	"bytes"
+	"encoding/gob"
+	"hash/fnv"
+)
+
+// bfData is used for serialization of BloomFilter
+type bfData struct {
+	M     uint
+	K     uint
+	Bits  []byte
+	Seeds []uint64
+}
+
+func init() {
+	gob.Register(&bfData{})
+}
 
 type BloomFilter struct {
 	m     uint
@@ -48,4 +64,38 @@ func (bf *BloomFilter) Exists(item string) bool {
 		}
 	}
 	return true
+}
+
+// GobEncode implements gob.GobEncoder interface
+func (bf *BloomFilter) GobEncode() ([]byte, error) {
+	data := &bfData{
+		M:     bf.m,
+		K:     bf.k,
+		Bits:  bf.bits,
+		Seeds: bf.seeds,
+	}
+
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(data); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// GobDecode implements gob.GobDecoder interface
+func (bf *BloomFilter) GobDecode(data []byte) error {
+	var tmp bfData
+	dec := gob.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&tmp); err != nil {
+		return err
+	}
+
+	// Restore data
+	bf.m = tmp.M
+	bf.k = tmp.K
+	bf.bits = tmp.Bits
+	bf.seeds = tmp.Seeds
+
+	return nil
 }
