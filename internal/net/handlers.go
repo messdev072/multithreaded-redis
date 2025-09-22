@@ -11,26 +11,26 @@ import (
 	"time"
 )
 
-// extractStringArgs extracts string arguments from RESP array using pooled slices
-func extractStringArgs(args protocol.Array) []string {
-	result := store.GlobalPoolManager.GetArgs()
-	
-	for i, arg := range args {
-		if i == 0 {
-			continue // skip command name
-		}
-		if bulkStr, ok := arg.(protocol.BulkString); ok {
-			result = append(result, string(bulkStr))
-		}
-	}
-	
-	// Create a copy since we need to return the pooled slice
-	finalResult := make([]string, len(result))
-	copy(finalResult, result)
-	store.GlobalPoolManager.PutArgs(result)
-	
-	return finalResult
-}
+// // extractStringArgs extracts string arguments from RESP array using pooled slices
+// func extractStringArgs(args protocol.Array) []string {
+// 	result := store.GlobalPoolManager.GetArgs()
+
+// 	for i, arg := range args {
+// 		if i == 0 {
+// 			continue // skip command name
+// 		}
+// 		if bulkStr, ok := arg.(protocol.BulkString); ok {
+// 			result = append(result, string(bulkStr))
+// 		}
+// 	}
+
+// 	// Create a copy since we need to return the pooled slice
+// 	finalResult := make([]string, len(result))
+// 	copy(finalResult, result)
+// 	store.GlobalPoolManager.PutArgs(result)
+
+// 	return finalResult
+// }
 
 // Handle SET command with optional expiration
 func (s *Server) handleSET(c net.Conn, args protocol.Array) {
@@ -1162,7 +1162,7 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 			protocol.Integer(currentCount),
 		}
 		s.writeResponse(c, response)
-		
+
 		// Force immediate flush after each subscription confirmation
 		if buffConn, ok := c.(*BufferedConn); ok {
 			buffConn.Flush()
@@ -1174,7 +1174,7 @@ func (s *Server) handleSubscribe(c net.Conn, args protocol.Array) {
 			}
 			s.mu.RUnlock()
 		}
-		
+
 		currentCount++
 	}
 
